@@ -25,17 +25,13 @@ import math
 
 import rclpy
 from action_msgs.msg import GoalStatus
-from geometry_msgs.msg import Pose
 from moveit_msgs.action import ExecuteTrajectory
 from moveit_msgs.srv import GetCartesianPath
 from rclpy.action import ActionClient
 from rclpy.node import Node
 from std_srvs.srv import SetBool
 
-from irb2600_coating_cell.geometry_utils import (
-    quaternion_with_z_axis,
-    rotate_vector_by_quaternion,
-)
+from irb2600_coating_cell.raster_path import flatten_rows, generate_raster_rows
 
 
 class TrajectoryPlannerNode(Node):
@@ -85,64 +81,16 @@ class TrajectoryPlannerNode(Node):
 
     def _generate_waypoints(self):
         p = self.get_parameter
-        position = [float(v) for v in p("target_structure.position").value]
-        rpy = [float(v) for v in p("target_structure.orientation_rpy").value]
-        size = [float(v) for v in p("target_structure.size").value]
-        local_normal = [float(v) for v in p("target_structure.local_normal").value]
-        d_standoff = float(p("d_standoff").value)
-        edge_margin = float(p("edge_margin").value)
-        row_pitch = float(p("row_pitch").value)
-
-        from irb2600_coating_cell.geometry_utils import quaternion_from_rpy
-
-        structure_quat = quaternion_from_rpy(*rpy)
-        normal_world = rotate_vector_by_quaternion(local_normal, structure_quat)
-
-        width_eff = max(size[1] - 2.0 * edge_margin, 0.0)
-        height_eff = max(size[2] - 2.0 * edge_margin, 0.0)
-        n_rows = max(int(round(height_eff / row_pitch)) + 1, 1)
-
-        waypoints = []
-        for row in range(n_rows):
-            local_z = -height_eff / 2.0 + row * (height_eff / max(n_rows - 1, 1))
-            y_start, y_end = -width_eff / 2.0, width_eff / 2.0
-            if row % 2 == 1:
-                y_start, y_end = y_end, y_start
-
-            for local_y in (y_start, y_end):
-                # Point on the panel face, in the panel's local frame, offset
-                # by half the thickness towards the working face
-                # (local_normal), then pushed out by d_standoff.
-                local_point = (
-                    local_normal[0] * (size[0] / 2.0),
-                    local_y,
-                    local_z,
-                )
-                surface_point_world = rotate_vector_by_quaternion(local_point, structure_quat)
-                x = position[0] + surface_point_world[0] + normal_world[0] * d_standoff
-                y = position[1] + surface_point_world[1] + normal_world[1] * d_standoff
-                z = position[2] + surface_point_world[2] + normal_world[2] * d_standoff
-
-                pose = Pose()
-                pose.position.x, pose.position.y, pose.position.z = x, y, z
-                # Physically, the nozzle's approach vector must point INTO
-                # the surface (like any real spray/weld/machining tool),
-                # i.e. antiparallel to the outward surface normal n_s used
-                # for the standoff offset above -- NOT parallel to it, even
-                # though eq. 9 (theta_error = arccos(z_e . n_s) <= 10 deg)
-                # reads as if z_e should equal n_s directly. Using +n_s here
-                # (tool pointing away from the panel, back over its own
-                # shoulder) was tested and made nearly the entire raster
-                # kinematically unreachable (fraction ~0 with IK/collision
-                # both failing regardless of the obstacle). Whichever
-                # eventually computes eq. 9 as a reported metric should
-                # measure the angle against -n_s (equivalently, against the
-                # surface's inward normal) to match this convention.
-                approach_direction = tuple(-c for c in normal_world)
-                pose.orientation = quaternion_with_z_axis(approach_direction)
-                waypoints.append(pose)
-
-        return waypoints, normal_world
+        rows, normal_world = generate_raster_rows(
+            position=p("target_structure.position").value,
+            rpy=p("target_structure.orientation_rpy").value,
+            size=p("target_structure.size").value,
+            local_normal=p("target_structure.local_normal").value,
+            d_standoff=p("d_standoff").value,
+            edge_margin=p("edge_margin").value,
+            row_pitch=p("row_pitch").value,
+        )
+        return flatten_rows(rows), normal_world
 
     # -- planning / execution -------------------------------------------------
 

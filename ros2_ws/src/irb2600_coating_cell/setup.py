@@ -32,6 +32,7 @@ setup(
             "perception_sim_node = irb2600_coating_cell.perception_sim_node:main",
             "spray_controller_node = irb2600_coating_cell.spray_controller_node:main",
             "trajectory_planner_node = irb2600_coating_cell.trajectory_planner_node:main",
+            "replanning_executor_node = irb2600_coating_cell.replanning_executor_node:main",
         ],
     },
 )

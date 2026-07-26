@@ -73,8 +73,8 @@ más rigurosa.
   ```bash
   ros2 run irb2600_coating_cell go_home_node
   ```
-- **`gui_control_node`**: panel simple con dos botones ("Go Home", "Start
-  Route") para no tener que escribir comandos por CLI. Ver Sección 5c.
+- **`gui_control_node`**: panel simple con tres botones ("Go Home", "Start
+  Route", "Stop") para no tener que escribir comandos por CLI. Ver Sección 5c.
 
 ## 1. Alcance de esta fase
 
@@ -205,9 +205,9 @@ vez de seguir a ciegas.
 ## 5c. Panel de control con botones (`gui_control_node`)
 
 Alternativa a los comandos de `go_home_node` / `replanning_executor_node`
-por CLI: una ventana Tkinter con dos botones, "Go Home" y "Start Route". Se
-eligió Tkinter (de la librería estándar de Python) en vez de un panel de
-RViz porque este workspace ya encontró tres bugs distintos del
+por CLI: una ventana Tkinter con tres botones, "Go Home", "Start Route" y
+"Stop". Se eligió Tkinter (de la librería estándar de Python) en vez de un
+panel de RViz porque este workspace ya encontró tres bugs distintos del
 `moveit_rviz_plugin` en esta instalación (ver Sección 6) y Tkinter no
 depende de ese plugin.
 
@@ -230,10 +230,17 @@ ros2 run irb2600_coating_cell gui_control_node
   (ejecución fila por fila con replanificación reactiva), pero con
   `execute:=true` forzado -- a diferencia del nodo por CLI (que por defecto
   solo planifica), el botón siempre mueve el robot de verdad.
+- **"Stop"**: solo habilitado mientras "Go Home" o "Start Route" están
+  corriendo. Cancela el goal de MoveGroup/ExecuteTrajectory que esté activo
+  en ese momento (no solo evita que arranque el siguiente movimiento) y
+  detiene la fila/ruta en curso de forma segura, apagando el spray si
+  estaba activo. Internamente usa `request_stop()` (ver
+  `irb2600_coating_cell/stoppable.py`).
 
-Mientras un botón está corriendo, ambos se deshabilitan (la llamada a
-MoveIt es bloqueante y corre en un hilo aparte para no congelar la
-ventana); la etiqueta de estado indica "Ready.", "Going home...", "Running
+Mientras "Go Home" o "Start Route" están corriendo, ambos se deshabilitan y
+solo "Stop" queda activo (las llamadas a MoveIt son bloqueantes y corren en
+un hilo aparte para no congelar la ventana); la etiqueta de estado indica
+"Ready.", "Going home...", "Running
 route..." o el error si algo falla.
 
 ## 6. Qué se validó en VM y qué sigue pendiente

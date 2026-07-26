@@ -47,7 +47,6 @@ scene_setup_node's docstring).
 import time
 
 import rclpy
-from action_msgs.msg import GoalStatus
 from geometry_msgs.msg import Pose
 from moveit_msgs.action import ExecuteTrajectory, MoveGroup
 from moveit_msgs.msg import Constraints, JointConstraint, MoveItErrorCodes
@@ -57,15 +56,21 @@ from rclpy.node import Node
 from std_srvs.srv import SetBool
 
 from irb2600_coating_cell.raster_path import generate_raster_rows
+from irb2600_coating_cell.stoppable import StoppableActionNode
 
 # Only the arm's own joints go into the IK seed / replanning joint goal.
 _ARM_JOINTS = ["joint_1", "joint_2", "joint_3", "joint_4", "joint_5", "joint_6"]
 
+# How often the between-rows pause and the stop check re-evaluate
+# request_stop() -- keeps "Stop" responsive without busy-waiting.
+_STOP_POLL_S = 0.1
 
-class ReplanningExecutorNode(Node):
+
+class ReplanningExecutorNode(StoppableActionNode, Node):
 
     def __init__(self, **kwargs):
         super().__init__("replanning_executor_node", **kwargs)
+        self._init_stoppable()
 
         self.declare_parameter("target_structure.frame_id", "world")
         self.declare_parameter("target_structure.position", [1.8, 0.0, 1.0])
@@ -116,7 +121,9 @@ class ReplanningExecutorNode(Node):
         """Plan+execute the whole raster, row by row, with reactive
         replanning. Public so callers other than main() (e.g. the Tkinter
         GUI's background thread) can reuse this node instance without
-        re-running __init__'s service/action waits each time."""
+        re-running __init__'s service/action waits each time. Can be
+        interrupted by request_stop() from another thread."""
+        self._clear_stop()
         p = self.get_parameter
         rows, _normal_world = generate_raster_rows(
             position=p("target_structure.position").value,
@@ -133,8 +140,21 @@ class ReplanningExecutorNode(Node):
         n_rows = len(rows)
 
         for idx, row in enumerate(rows):
+            if self._stop_requested():
+                self.get_logger().warn(
+                    f"Stop requested before row {idx + 1}. Aborting remaining rows."
+                )
+                self._stop_spray_sync()
+                break
+
             self.get_logger().info(f"--- Row {idx + 1}/{n_rows} ---")
             ok = self._process_row(row, idx, metrics)
+            if self._stop_requested():
+                self.get_logger().warn(
+                    f"Row {idx + 1}: stopped by user request. Aborting remaining rows."
+                )
+                self._stop_spray_sync()
+                break
             if not ok:
                 self.get_logger().error(
                     f"Row {idx + 1} could not be reached even after replanning "
@@ -150,13 +170,23 @@ class ReplanningExecutorNode(Node):
                     "the next row -- move an obstacle now to test Case 3, e.g.:\n"
                     '  ros2 param set /perception_sim_node scaffold_pole.position "[0.79, 0.0, 1.0]"'
                 )
-                time.sleep(segment_pause_s)
+                self._interruptible_sleep(segment_pause_s)
 
         self.get_logger().info(
             "Summary: {direct} row(s) direct, {replanned} row(s) replanned, "
             "{failed} row(s) failed, total replanning time {total_replan_time_s:.3f} s"
             .format(**metrics)
         )
+
+    def _interruptible_sleep(self, duration_s):
+        """time.sleep() split into short slices so request_stop() (called
+        from another thread, e.g. the GUI) takes effect within
+        _STOP_POLL_S instead of only after the full pause elapses."""
+        elapsed = 0.0
+        while elapsed < duration_s and not self._stop_requested():
+            step = min(_STOP_POLL_S, duration_s - elapsed)
+            time.sleep(step)
+            elapsed += step
 
     def _process_row(self, row, idx, metrics):
         t0 = time.time()
@@ -385,21 +415,17 @@ class ReplanningExecutorNode(Node):
         self._execute_client.wait_for_server()
         goal = ExecuteTrajectory.Goal()
         goal.trajectory = trajectory
-        send_goal_future = self._execute_client.send_goal_async(goal)
-        rclpy.spin_until_future_complete(self, send_goal_future)
-        goal_handle = send_goal_future.result()
-
-        if not goal_handle.accepted:
-            self.get_logger().error("execute_trajectory goal was rejected.")
-            self._set_spray_sync(False)
-            return False
-
-        result_future = goal_handle.get_result_async()
-        rclpy.spin_until_future_complete(self, result_future)
-        result = result_future.result()
+        result_response = self._send_goal_and_wait(self._execute_client, goal)
 
         self._set_spray_sync(False)
-        succeeded = result.status == GoalStatus.STATUS_SUCCEEDED
+
+        if result_response is None:
+            self.get_logger().error("execute_trajectory goal was rejected.")
+            return False
+        if self._cancelled(result_response):
+            self.get_logger().warn("Trajectory execution cancelled (Stop).")
+            return False
+        succeeded = self._succeeded(result_response)
         if not succeeded:
             self.get_logger().error("Trajectory execution FAILED.")
         return succeeded

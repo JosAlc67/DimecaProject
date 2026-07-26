@@ -8,19 +8,21 @@ between manual test runs.
 """
 
 import rclpy
-from action_msgs.msg import GoalStatus
 from moveit_msgs.action import MoveGroup
 from moveit_msgs.msg import Constraints, JointConstraint
 from rclpy.action import ActionClient
 from rclpy.node import Node
 
+from irb2600_coating_cell.stoppable import StoppableActionNode
+
 _ARM_JOINTS = ["joint_1", "joint_2", "joint_3", "joint_4", "joint_5", "joint_6"]
 
 
-class GoHomeNode(Node):
+class GoHomeNode(StoppableActionNode, Node):
 
-    def __init__(self):
-        super().__init__("go_home_node")
+    def __init__(self, **kwargs):
+        super().__init__("go_home_node", **kwargs)
+        self._init_stoppable()
         self.declare_parameter("group_name", "manipulator")
         self.declare_parameter("planning_time_s", 3.0)
 
@@ -31,7 +33,9 @@ class GoHomeNode(Node):
     def go_home(self):
         """Plan+execute a return to the "home" pose (all joints = 0). Public
         so callers other than main() (e.g. the Tkinter GUI's background
-        thread) can reuse this node instance directly."""
+        thread) can reuse this node instance directly. Can be interrupted
+        by request_stop() from another thread."""
+        self._clear_stop()
         constraints = Constraints()
         for joint_name in _ARM_JOINTS:
             jc = JointConstraint()
@@ -64,20 +68,14 @@ class GoHomeNode(Node):
         goal.planning_options.planning_scene_diff.is_diff = True
 
         self.get_logger().info("Planning path to home (all joints = 0)...")
-        send_goal_future = self._client.send_goal_async(goal)
-        rclpy.spin_until_future_complete(self, send_goal_future)
-        goal_handle = send_goal_future.result()
+        result_response = self._send_goal_and_wait(self._client, goal)
 
-        if not goal_handle.accepted:
+        if result_response is None:
             self.get_logger().error("move_action goal rejected.")
-            return
-
-        result_future = goal_handle.get_result_async()
-        rclpy.spin_until_future_complete(self, result_future)
-        result_response = result_future.result()
-
-        if result_response.status == GoalStatus.STATUS_SUCCEEDED:
+        elif self._succeeded(result_response):
             self.get_logger().info("Home reached.")
+        elif self._cancelled(result_response):
+            self.get_logger().warn("Go Home cancelled (Stop).")
         else:
             self.get_logger().error(
                 f"Failed to reach home (status={result_response.status}, "

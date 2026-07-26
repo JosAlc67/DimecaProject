@@ -1,7 +1,7 @@
-"""Simple Tkinter control panel with two buttons: "Go Home" and "Start
-Route". Wraps GoHomeNode.go_home() and ReplanningExecutorNode.run_route()
-so operating the cell doesn't require typing CLI commands in a separate
-terminal each time.
+"""Simple Tkinter control panel with three buttons: "Go Home", "Start
+Route" and "Stop". Wraps GoHomeNode.go_home(), ReplanningExecutorNode.
+run_route() and their request_stop() so operating the cell doesn't require
+typing CLI commands in a separate terminal each time.
 
 An RViz panel plugin was considered instead but ruled out: this workspace
 already ran into three separate moveit_rviz_plugin bugs on this ROS 2
@@ -17,6 +17,11 @@ here.
 replanning_executor_node, but with execute:=true forced on (this GUI's
 whole point is to actually move the robot, unlike that node's plan-only
 CLI default).
+
+"Stop" (only enabled while Go Home or Start Route is running) cancels the
+in-progress MoveGroup/ExecuteTrajectory goal via request_stop() (see
+stoppable.py) -- it interrupts whatever is currently moving, not just
+whatever hasn't started yet.
 
 Requires the python3-tk system package (not a rosdep/pip dependency):
     sudo apt install -y python3-tk
@@ -42,6 +47,7 @@ class ControlPanelApp:
         self._replanning_node = replanning_node
         self._events = queue.Queue()
         self._busy = False
+        self._active_node = None
 
         root.title("IRB2600 Coating Cell - Control Panel")
 
@@ -61,26 +67,42 @@ class ControlPanelApp:
         )
         self._route_button.pack(side="left", padx=5, expand=True, fill="x")
 
+        self._stop_button = ttk.Button(
+            button_frame, text="Stop", command=self._on_stop, state="disabled"
+        )
+        self._stop_button.pack(side="left", padx=5, expand=True, fill="x")
+
         self._poll_events()
 
     # -- button handlers ----------------------------------------------------
 
     def _on_go_home(self):
-        self._run_in_background("Going home...", self._go_home_node.go_home)
+        self._run_in_background(
+            "Going home...", self._go_home_node, self._go_home_node.go_home
+        )
 
     def _on_start_route(self):
-        self._run_in_background("Running route...", self._replanning_node.run_route)
+        self._run_in_background(
+            "Running route...", self._replanning_node, self._replanning_node.run_route
+        )
 
-    def _run_in_background(self, status_text, target):
+    def _on_stop(self):
+        if self._active_node is not None:
+            self._status_var.set("Stopping...")
+            self._active_node.request_stop()
+
+    def _run_in_background(self, status_text, node, target):
         # rclpy's spin_until_future_complete() calls inside go_home()/
         # run_route() block the calling thread, so they run off the Tk main
-        # thread to keep the window responsive; buttons are disabled for
-        # the duration to avoid two blocking calls overlapping on the same
-        # underlying node.
+        # thread to keep the window responsive; Go Home/Start Route are
+        # disabled for the duration to avoid two blocking calls overlapping
+        # on the same underlying node, while Stop stays enabled so it can
+        # reach the node that is actually running.
         if self._busy:
             return
         self._busy = True
-        self._set_buttons_enabled(False)
+        self._active_node = node
+        self._set_buttons_enabled(running=True)
         self._status_var.set(status_text)
 
         def worker():
@@ -92,10 +114,10 @@ class ControlPanelApp:
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _set_buttons_enabled(self, enabled):
-        state = "normal" if enabled else "disabled"
-        self._home_button.configure(state=state)
-        self._route_button.configure(state=state)
+    def _set_buttons_enabled(self, running):
+        self._home_button.configure(state="disabled" if running else "normal")
+        self._route_button.configure(state="disabled" if running else "normal")
+        self._stop_button.configure(state="normal" if running else "disabled")
 
     def _poll_events(self):
         try:
@@ -106,7 +128,8 @@ class ControlPanelApp:
                 elif kind == "error":
                     self._status_var.set(f"Error: {payload}")
                 self._busy = False
-                self._set_buttons_enabled(True)
+                self._active_node = None
+                self._set_buttons_enabled(running=False)
         except queue.Empty:
             pass
         self._root.after(100, self._poll_events)

@@ -25,13 +25,6 @@ Visualization Manager:
       Show Names: true
       Show Axes: true
       Show Arrows: false
-    - Class: moveit_rviz_plugin/PlanningScene
-      Name: PlanningScene
-      Enabled: true
-      Scene Robot:
-        Show Robot Visual: true
-      Move Group Namespace: ""
-      Planning Scene Topic: /monitored_planning_scene
   Global Options:
     Fixed Frame: world
     Background Color: 48; 48; 48

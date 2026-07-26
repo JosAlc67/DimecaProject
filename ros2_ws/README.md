@@ -121,12 +121,16 @@ source install/setup.bash
    ros2 run irb2600_coating_cell trajectory_planner_node --ros-args -p execute:=true
    ```
 
-Para mover el obstáculo y volver a aplicar la escena (probar manualmente el
-Caso 2 con otra posición):
+Para mover el obstáculo (probar manualmente el Caso 2 con otra posición),
+`scene_setup_node` está suscrito a `/obstacle_pose` de `perception_sim_node`
+y vuelve a aplicar la escena automáticamente en cuanto cambia — basta con:
 ```bash
-ros2 param set /scene_setup_node obstacle.position "[0.5, 0.1, 1.0]"
-ros2 service call /scene_setup_node/refresh_scene std_srvs/srv/Trigger
+ros2 param set /perception_sim_node obstacle.position "[0.5, 0.1, 1.0]"
 ```
+(Si corres `scene_setup_node` sin `perception_sim_node`, usa el método
+manual como respaldo: `ros2 param set /scene_setup_node obstacle.position
+"[...]"` seguido de `ros2 service call /scene_setup_node/refresh_scene
+std_srvs/srv/Trigger`.)
 
 ## 5b. Probar el Caso 3 (obstáculo dinámico + replanificación)
 
@@ -145,8 +149,7 @@ mano y ver cómo reacciona la siguiente fila:
 
 ```bash
 # En otra terminal, durante la pausa entre filas:
-ros2 param set /scene_setup_node obstacle.position "[0.79, 0.0, 1.0]"
-ros2 service call /scene_setup_node/refresh_scene std_srvs/srv/Trigger
+ros2 param set /perception_sim_node obstacle.position "[0.79, 0.0, 1.0]"
 ```
 
 Al final imprime un resumen (`Summary: N row(s) direct, M row(s) replanned,
@@ -181,6 +184,14 @@ vez de seguir a ciegas.
   con la posición "de reposo"), y apuntar a un punto interpolado un poco
   antes del extremo original de la fila en vez del punto exacto — ver los
   comentarios en `_replan_row` para el detalle completo del diagnóstico.
+- **Sensor simulado conectado a la escena** (no probado en VM todavía,
+  implementado justo después de la corrida de arriba): `scene_setup_node`
+  ahora se suscribe a `/obstacle_pose` y `/workspace_clear` de
+  `perception_sim_node` y vuelve a aplicar la escena automáticamente cuando
+  la posición del obstáculo cambia — mover el obstáculo ya no requiere el
+  paso manual de `refresh_scene`, solo cambiar el parámetro en
+  `perception_sim_node` (ver Sección 5). Repórtame errores si esto falla en
+  tu próxima corrida, igual que con todo lo anterior.
 
 **Pendiente / no verificado rigurosamente:**
 
@@ -198,14 +209,8 @@ vez de seguir a ciegas.
   se moviera **a mitad de una fila** en ejecución, no se detectaría hasta
   que esa fila termine. Un sistema con monitoreo continuo necesitaría
   revisar la escena durante la ejecución, no solo antes de cada segmento.
-- **`perception_sim_node` no está conectado a la planificación todavía**: el
-  nodo de "cámara RGB-D simulada" publica `structure_pose`/`obstacle_pose`/
-  `workspace_clear`, pero ni `trajectory_planner_node` ni
-  `replanning_executor_node` los suscriben — ambos leen la posición del
-  obstáculo directo de los parámetros de `scene_setup_node`. Para que el
-  "sensor" simulado realmente informe la decisión de replanificación (en
-  vez de solo existir en paralelo), habría que hacer que estos nodos
-  suscriban esos tópicos en lugar de leer los parámetros directamente.
+  Esto sigue pendiente — lo de abajo solo conecta el sensor a la escena, no
+  cambia cuándo se revisa.
 - Errores cosméticos que persisten en los logs sin afectar el funcionamiento:
   advertencia "No 3D sensor plugin(s) defined for octomap updates" (no
   usamos octomap) y "unrealistic inertia" por eslabón (RViz avisando que no

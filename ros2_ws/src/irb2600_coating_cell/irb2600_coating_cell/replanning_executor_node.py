@@ -230,6 +230,18 @@ class ReplanningExecutorNode(Node):
         goal.request.max_velocity_scaling_factor = 0.5
         goal.request.max_acceleration_scaling_factor = 0.5
         goal.request.goal_constraints = [constraints]
+        # Left unset, this defaults to a zero-volume (0,0,0)-(0,0,0) box,
+        # which can make every candidate state look "out of bounds" to
+        # planners/adapters that check it -- easy to miss since it has
+        # nothing to do with the arm's actual joint limits (which come from
+        # joint_limits.yaml/the URDF regardless of this field).
+        goal.request.workspace_parameters.header.frame_id = frame_id
+        goal.request.workspace_parameters.min_corner.x = -3.0
+        goal.request.workspace_parameters.min_corner.y = -3.0
+        goal.request.workspace_parameters.min_corner.z = -3.0
+        goal.request.workspace_parameters.max_corner.x = 3.0
+        goal.request.workspace_parameters.max_corner.y = 3.0
+        goal.request.workspace_parameters.max_corner.z = 3.0
 
         # Plan only; we execute separately via /execute_trajectory, same as
         # the direct-Cartesian path, so both routes share one execution path.

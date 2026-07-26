@@ -8,13 +8,22 @@ planning scene:
 
   - If clear (fraction >= fraction_threshold): execute it directly, exactly
     like trajectory_planner_node does for the whole path.
-  - If blocked: attempt to replan -- ask move_group for a full joint-space
-    (OMPL) plan to the row's end pose, expressed as position/orientation
-    goal constraints (not a pre-solved joint goal: OMPL samples/solves IK
-    itself as part of planning, unlike straight-line Cartesian interpolation,
-    it can route around the obstacle). If that also fails, the row is
-    unreachable: report it as a failed trajectory and stop (Table XVII
-    Case 4), matching Sec. VI-B's "safe robot stop".
+  - If blocked: attempt to replan -- compute IK for the row's end pose,
+    *seeded from the last joint state the blocked Cartesian path actually
+    reached* (not the robot's current/starting state), then ask move_group
+    for a full joint-space (OMPL) plan to that joint goal (which, unlike
+    straight-line Cartesian interpolation, can route around the obstacle).
+    The warm seed matters: KDL (this project's kinematics_solver) is a local
+    numerical IK solver, and on the VM it consistently failed to converge
+    for a row's end pose when seeded from a "cold"/far state -- both via a
+    direct /compute_ik call and via OMPL's own internal goal-constraint
+    sampler ("Unable to sample any valid states for goal tree") -- even
+    though the Cartesian planner could already get ~80% of the way to that
+    same pose by construction (warm-started, incremental steps). Seeding IK
+    from that near-target state converges reliably where a cold seed did
+    not. If that also fails, the row is unreachable: report it as a failed
+    trajectory and stop (Table XVII Case 4), matching Sec. VI-B's "safe
+    robot stop".
 
 Between rows the node pauses for `segment_pause_s` seconds, specifically so
 you can trigger a "controlled change in obstacle position" during that
@@ -32,14 +41,16 @@ import time
 import rclpy
 from action_msgs.msg import GoalStatus
 from moveit_msgs.action import ExecuteTrajectory, MoveGroup
-from moveit_msgs.msg import Constraints, MoveItErrorCodes, OrientationConstraint, PositionConstraint
-from moveit_msgs.srv import GetCartesianPath
+from moveit_msgs.msg import Constraints, JointConstraint, MoveItErrorCodes
+from moveit_msgs.srv import GetCartesianPath, GetPositionIK
 from rclpy.action import ActionClient
 from rclpy.node import Node
-from shape_msgs.msg import SolidPrimitive
 from std_srvs.srv import SetBool
 
 from irb2600_coating_cell.raster_path import generate_raster_rows
+
+# Only the arm's own joints go into the IK seed / replanning joint goal.
+_ARM_JOINTS = ["joint_1", "joint_2", "joint_3", "joint_4", "joint_5", "joint_6"]
 
 
 class ReplanningExecutorNode(Node):
@@ -68,10 +79,12 @@ class ReplanningExecutorNode(Node):
         self.declare_parameter("segment_pause_s", 3.0)
         self.declare_parameter("replanning_time_s", 2.0)
         self.declare_parameter("replanning_attempts", 5)
+        self.declare_parameter("ik_timeout_s", 1.0)
 
         self._cartesian_path_client = self.create_client(
             GetCartesianPath, "compute_cartesian_path"
         )
+        self._ik_client = self.create_client(GetPositionIK, "compute_ik")
         self._move_group_client = ActionClient(self, MoveGroup, "move_action")
         self._execute_client = ActionClient(self, ExecuteTrajectory, "execute_trajectory")
         self._spray_client = self.create_client(
@@ -80,6 +93,7 @@ class ReplanningExecutorNode(Node):
 
         self.get_logger().info("Waiting for /compute_cartesian_path (move_group)...")
         self._cartesian_path_client.wait_for_service()
+        self._ik_client.wait_for_service()
 
         self._run()
 
@@ -146,8 +160,9 @@ class ReplanningExecutorNode(Node):
             f"{t_plan:.3f} s). Replanning around it (Table VI 'Replan the "
             "trajectory')..."
         )
+        seed = self._extract_last_joint_state(trajectory)
         t0 = time.time()
-        replanned_trajectory = self._replan_row(row, idx)
+        replanned_trajectory = self._replan_row(row, idx, seed)
         t_replan = time.time() - t0
         metrics["total_replan_time_s"] += t_replan
 
@@ -179,44 +194,70 @@ class ReplanningExecutorNode(Node):
         response = future.result()
         return response.fraction, response.solution
 
-    # -- replanning fallback: full joint-space (OMPL) plan to the row's end pose --
+    @staticmethod
+    def _extract_last_joint_state(trajectory):
+        """Names/positions of the last point of a (possibly partial)
+        RobotTrajectory, used as a warm IK seed. None if it has no points."""
+        points = trajectory.joint_trajectory.points
+        if not points:
+            return None
+        return list(trajectory.joint_trajectory.joint_names), list(points[-1].positions)
 
-    def _replan_row(self, row, idx):
+    # -- replanning fallback: IK (warm-seeded) + full joint-space (OMPL) plan --
+
+    def _replan_row(self, row, idx, seed):
         goal_pose = row[-1]
-        frame_id = self.get_parameter("target_structure.frame_id").value
-        tcp_link = self.get_parameter("tcp_link").value
 
-        # Goal expressed as Position + Orientation constraints (small
-        # tolerance spheres/angles around the row's end pose) rather than a
-        # pre-solved joint-space goal: OMPL samples/solves IK itself as part
-        # of planning, which is more robust than a single external
-        # /compute_ik call (KDL is a local numerical solver and can fail to
-        # converge for a pose that is, in fact, reachable by some other
-        # joint configuration -- this was tried first and consistently
-        # failed with error_code=-31/NO_IK_SOLUTION even for poses the
-        # Cartesian planner could get most of the way to).
-        position_constraint = PositionConstraint()
-        position_constraint.header.frame_id = frame_id
-        position_constraint.link_name = tcp_link
-        position_constraint.weight = 1.0
-        sphere = SolidPrimitive()
-        sphere.type = SolidPrimitive.SPHERE
-        sphere.dimensions = [0.01]
-        position_constraint.constraint_region.primitives = [sphere]
-        position_constraint.constraint_region.primitive_poses = [goal_pose]
+        ik_request = GetPositionIK.Request()
+        ik_request.ik_request.group_name = self.get_parameter("group_name").value
+        ik_request.ik_request.ik_link_name = self.get_parameter("tcp_link").value
+        ik_request.ik_request.pose_stamped.header.frame_id = self.get_parameter(
+            "target_structure.frame_id"
+        ).value
+        ik_request.ik_request.pose_stamped.pose = goal_pose
+        ik_request.ik_request.avoid_collisions = True
+        if seed is not None:
+            names, positions = seed
+            ik_request.ik_request.robot_state.joint_state.name = names
+            ik_request.ik_request.robot_state.joint_state.position = positions
+            ik_request.ik_request.robot_state.is_diff = False
+        else:
+            # No partial trajectory to seed from (blocked on the very first
+            # interpolation step) -- fall back to the current state.
+            ik_request.ik_request.robot_state.is_diff = True
+        ik_timeout_s = float(self.get_parameter("ik_timeout_s").value)
+        ik_request.ik_request.timeout.sec = int(ik_timeout_s)
+        ik_request.ik_request.timeout.nanosec = int(
+            (ik_timeout_s - int(ik_timeout_s)) * 1e9
+        )
 
-        orientation_constraint = OrientationConstraint()
-        orientation_constraint.header.frame_id = frame_id
-        orientation_constraint.link_name = tcp_link
-        orientation_constraint.orientation = goal_pose.orientation
-        orientation_constraint.absolute_x_axis_tolerance = 0.1
-        orientation_constraint.absolute_y_axis_tolerance = 0.1
-        orientation_constraint.absolute_z_axis_tolerance = 0.1
-        orientation_constraint.weight = 1.0
+        future = self._ik_client.call_async(ik_request)
+        rclpy.spin_until_future_complete(self, future)
+        ik_response = future.result()
+
+        if ik_response.error_code.val != MoveItErrorCodes.SUCCESS:
+            self.get_logger().error(
+                f"Row {idx + 1}: no collision-free IK solution for the row's "
+                f"end pose either (error_code={ik_response.error_code.val}); "
+                "the row is genuinely unreachable in the current scene."
+            )
+            return None
+
+        joint_positions = dict(
+            zip(ik_response.solution.joint_state.name, ik_response.solution.joint_state.position)
+        )
 
         constraints = Constraints()
-        constraints.position_constraints = [position_constraint]
-        constraints.orientation_constraints = [orientation_constraint]
+        for joint_name in _ARM_JOINTS:
+            if joint_name not in joint_positions:
+                continue
+            jc = JointConstraint()
+            jc.joint_name = joint_name
+            jc.position = joint_positions[joint_name]
+            jc.tolerance_above = 0.01
+            jc.tolerance_below = 0.01
+            jc.weight = 1.0
+            constraints.joint_constraints.append(jc)
 
         goal = MoveGroup.Goal()
         goal.request.group_name = self.get_parameter("group_name").value
@@ -235,6 +276,7 @@ class ReplanningExecutorNode(Node):
         # planners/adapters that check it -- easy to miss since it has
         # nothing to do with the arm's actual joint limits (which come from
         # joint_limits.yaml/the URDF regardless of this field).
+        frame_id = self.get_parameter("target_structure.frame_id").value
         goal.request.workspace_parameters.header.frame_id = frame_id
         goal.request.workspace_parameters.min_corner.x = -3.0
         goal.request.workspace_parameters.min_corner.y = -3.0

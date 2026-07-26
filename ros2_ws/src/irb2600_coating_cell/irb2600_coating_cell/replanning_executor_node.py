@@ -40,6 +40,7 @@ import time
 
 import rclpy
 from action_msgs.msg import GoalStatus
+from geometry_msgs.msg import Pose
 from moveit_msgs.action import ExecuteTrajectory, MoveGroup
 from moveit_msgs.msg import Constraints, JointConstraint, MoveItErrorCodes
 from moveit_msgs.srv import GetCartesianPath, GetPositionIK
@@ -168,7 +169,7 @@ class ReplanningExecutorNode(Node):
         )
         seed = self._extract_last_joint_state(trajectory)
         t0 = time.time()
-        replanned_trajectory = self._replan_row(row, idx, seed)
+        replanned_trajectory = self._replan_row(row, idx, seed, fraction)
         t_replan = time.time() - t0
         metrics["total_replan_time_s"] += t_replan
 
@@ -211,8 +212,40 @@ class ReplanningExecutorNode(Node):
 
     # -- replanning fallback: IK (warm-seeded) + full joint-space (OMPL) plan --
 
-    def _replan_row(self, row, idx, seed):
-        goal_pose = row[-1]
+    def _replan_row(self, row, idx, seed, fraction):
+        # Rather than insisting on the row's exact original end pose, back
+        # off to a point interpolated between the row's start and end,
+        # slightly short of how far the (collision-free) Cartesian
+        # interpolation already got -- that region is already known to be
+        # reachable and collision-free, so IK/OMPL only need to search a
+        # small, well-behaved margin instead of a specific far point that
+        # may sit right against the obstacle boundary. This does mean this
+        # row's coverage is shortened when replanning kicks in, which the
+        # report's own eq. 5 (trajectory length L) already anticipates as
+        # the measurable cost of avoidance.
+        margin = 0.05
+        target_t = max(0.0, min(fraction - margin, 0.95))
+        if target_t <= 0.0:
+            self.get_logger().error(
+                f"Row {idx + 1}: blocked too early (fraction={fraction:.3f}) "
+                "to back off to a safe intermediate point."
+            )
+            return None
+
+        start, end = row[0], row[-1]
+        goal_pose = Pose()
+        goal_pose.position.x = start.position.x + target_t * (
+            end.position.x - start.position.x
+        )
+        goal_pose.position.y = start.position.y + target_t * (
+            end.position.y - start.position.y
+        )
+        goal_pose.position.z = start.position.z + target_t * (
+            end.position.z - start.position.z
+        )
+        # Orientation is constant across a row (and across the whole panel):
+        # raster_path.py computes it once from the panel's surface normal.
+        goal_pose.orientation = end.orientation
 
         ik_request = GetPositionIK.Request()
         ik_request.ik_request.group_name = self.get_parameter("group_name").value

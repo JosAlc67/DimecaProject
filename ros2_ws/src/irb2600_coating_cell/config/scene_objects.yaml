@@ -32,12 +32,19 @@
     # each one's pose on its own topic (/obstacles/<name>/pose).
     obstacles: ["scaffold_pole", "tool_cart", "cable_reel"]
 
+    # All three obstacles sit on a ~0.7-0.75 m radius ring around the robot
+    # base (world origin), spread apart angularly, clearing the pedestal
+    # (its footprint is roughly 0.4-0.5 m) with visible margin, and stopping
+    # short of the panel's own standoff waypoints (~x=0.79 m for the default
+    # d_standoff=0.20) so they read as obstacles *in the approach path*
+    # rather than glued to either the robot or the panel.
+
     # A vertical scaffolding pole: tall and thin, spans most of the panel
     # height. The one most likely to block a coating pass outright.
     scaffold_pole:
       type: "cylinder"
       frame_id: "world"
-      position: [0.55, 0.3, 1.05]
+      position: [0.65, 0.35, 1.05]
       orientation_rpy: [0.0, 0.0, 0.0]
       size: [0.9, 0.04, 0.0] # cylinder: [height, radius, unused]
 
@@ -46,18 +53,18 @@
     tool_cart:
       type: "box"
       frame_id: "world"
-      position: [0.55, -0.3, 0.55]
+      position: [0.65, -0.35, 0.55]
       orientation_rpy: [0.0, 0.0, 0.0]
       size: [0.35, 0.35, 0.55] # box: [x, y, z]
 
-    # A cable reel near the floor/pedestal: small and low, meant to sit
-    # mostly clear of the panel's work envelope -- included so the scene
-    # isn't just "obstacles that block everything", matching a cluttered but
-    # not impassable real work area.
+    # A cable reel near the floor, straight ahead of the base: small and
+    # low, meant to sit mostly clear of the panel's work envelope --
+    # included so the scene isn't just "obstacles that block everything",
+    # matching a cluttered but not impassable real work area.
     cable_reel:
       type: "cylinder"
       frame_id: "world"
-      position: [0.35, 0.0, 0.35]
+      position: [0.65, 0.0, 0.3]
       orientation_rpy: [0.0, 0.0, 0.0]
       size: [0.3, 0.15, 0.0]
 

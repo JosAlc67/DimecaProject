@@ -219,26 +219,35 @@ class ReplanningExecutorNode(Node):
 
     # -- replanning fallback: IK (warm-seeded) + full joint-space (OMPL) plan --
 
-    def _replan_row(self, row, idx, seed, fraction):
-        # Rather than insisting on the row's exact original end pose, back
-        # off to a point interpolated between the row's start and end,
-        # slightly short of how far the (collision-free) Cartesian
-        # interpolation already got -- that region is already known to be
-        # reachable and collision-free, so IK/OMPL only need to search a
-        # small, well-behaved margin instead of a specific far point that
-        # may sit right against the obstacle boundary. This does mean this
-        # row's coverage is shortened when replanning kicks in, which the
-        # report's own eq. 5 (trajectory length L) already anticipates as
-        # the measurable cost of avoidance.
-        margin = 0.05
-        target_t = max(0.0, min(fraction - margin, 0.95))
-        if target_t <= 0.0:
-            self.get_logger().error(
-                f"Row {idx + 1}: blocked too early (fraction={fraction:.3f}) "
-                "to back off to a safe intermediate point."
-            )
-            return None
+    # Tried in order until one produces a reachable, collision-free target.
+    # A single small margin isn't always enough: an obstacle can run
+    # alongside a stretch of the row rather than just touching its tail, so
+    # retry further back before giving up (report eq. 5 already frames a
+    # shortened row as the measurable cost of avoidance -- trying harder to
+    # find *some* safe point instead of failing on the first attempt is the
+    # same idea taken further).
+    _REPLAN_MARGINS = [0.05, 0.10, 0.20, 0.35]
 
+    def _replan_row(self, row, idx, seed, fraction):
+        for margin in self._REPLAN_MARGINS:
+            target_t = max(0.0, min(fraction - margin, 0.95))
+            if target_t <= 0.0:
+                break
+            self.get_logger().info(
+                f"Row {idx + 1}: trying replan target at t={target_t:.3f} "
+                f"(margin={margin:.2f})."
+            )
+            trajectory = self._attempt_replan_at(row, idx, seed, target_t)
+            if trajectory is not None:
+                return trajectory
+
+        self.get_logger().error(
+            f"Row {idx + 1}: no margin in {self._REPLAN_MARGINS} produced a "
+            f"reachable, collision-free replan target (fraction={fraction:.3f})."
+        )
+        return None
+
+    def _attempt_replan_at(self, row, idx, seed, target_t):
         start, end = row[0], row[-1]
         goal_pose = Pose()
         goal_pose.position.x = start.position.x + target_t * (
@@ -284,10 +293,9 @@ class ReplanningExecutorNode(Node):
         ik_response = future.result()
 
         if ik_response.error_code.val != MoveItErrorCodes.SUCCESS:
-            self.get_logger().error(
-                f"Row {idx + 1}: no collision-free IK solution for the row's "
-                f"end pose either (error_code={ik_response.error_code.val}); "
-                "the row is genuinely unreachable in the current scene."
+            self.get_logger().warn(
+                f"Row {idx + 1}: no collision-free IK solution at t={target_t:.3f} "
+                f"(error_code={ik_response.error_code.val})."
             )
             return None
 
@@ -352,9 +360,9 @@ class ReplanningExecutorNode(Node):
         result = result_future.result().result
 
         if result.error_code.val != MoveItErrorCodes.SUCCESS:
-            self.get_logger().error(
+            self.get_logger().warn(
                 f"Row {idx + 1}: OMPL could not find a collision-free joint-space "
-                f"path either (error_code={result.error_code.val})."
+                f"path to t={target_t:.3f} (error_code={result.error_code.val})."
             )
             return None
 

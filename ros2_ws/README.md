@@ -73,8 +73,12 @@ más rigurosa.
   ```bash
   ros2 run irb2600_coating_cell go_home_node
   ```
-- **`gui_control_node`**: panel simple con tres botones ("Go Home", "Start
-  Route", "Stop") para no tener que escribir comandos por CLI. Ver Sección 5c.
+- **`gui_control_node`**: **validado en VM**. Panel Tkinter con tres botones
+  ("Go Home", "Start Route", "Stop") para no tener que escribir comandos por
+  CLI — confirmado que "Go Home" y "Start Route" mueven el robot igual que
+  sus equivalentes por CLI, y que "Stop" cancela el movimiento/fila en
+  curso (no solo el siguiente) apagando el spray si estaba activo. Ver
+  Sección 5c.
 
 ## 1. Alcance de esta fase
 
@@ -281,6 +285,13 @@ route..." o el error si algo falla.
   reaccionara al nuevo bloqueo (detectado casi de inmediato,
   `fraction=0.038`, y reportado como fallo seguro al no haber margen para
   replanificar — Caso 4 correctamente identificado con la nueva posición).
+- **Panel de control con botones** (`gui_control_node`): **validado en VM**.
+  "Go Home" y "Start Route" ejecutan la misma lógica que sus nodos CLI
+  equivalentes (con `execute:=true` forzado para "Start Route"); "Stop"
+  cancela el goal de MoveGroup/ExecuteTrajectory activo en ese momento
+  (`request_stop()` en `stoppable.py`, con espera interrumpible en vez de
+  un `spin_until_future_complete` sin límite) y no solo bloquea el
+  siguiente movimiento en cola.
 
 **Pendiente / no verificado rigurosamente:**
 

@@ -22,9 +22,17 @@ más rigurosa.
   el robot se detiene antes de tocar el obstáculo (confirmado numérica y
   visualmente en RViz). El sistema reporta la colisión en vez de ejecutar a
   ciegas, tal como especifica la Tabla VI ("Check collisions").
-- **Caso 3** (obstáculo dinámico + replanificación automática): implementado
-  en `replanning_executor_node` (Fase 2, Sección 5b) — todavía **sin
-  validar en VM**, a diferencia de los Casos 1 y 2 arriba.
+- **Caso 3** (obstáculo dinámico + replanificación automática): **validado en
+  VM**. Corrida real con `replanning_executor_node` sobre 6 filas: Fila 1 y
+  Fila 2 quedaron bloqueadas y el sistema replanificó y las ejecutó con éxito
+  (Tabla VI "Replan the trajectory"); Fila 3 pasó directa sin bloqueo (como
+  el Caso 1); Fila 4 quedó completamente bloqueada (`fraction=0.000`, sin
+  margen para replanificar) y el sistema se detuvo de forma segura en vez de
+  intentar algo a ciegas — esto es el **Caso 4** de la Tabla XVII
+  ("Failed-trajectory report and safe robot stop"), también confirmado en la
+  misma corrida.
+- **Caso 4** (obstáculo bloquea el acceso por completo): confirmado junto
+  con el Caso 3 arriba (Fila 4).
 
 ## 1. Alcance de esta fase
 
@@ -165,6 +173,14 @@ vez de seguir a ciegas.
   `ros2 topic info`: 1 publisher, 0 subscribers) — se reemplazó por un
   `MarkerArray` propio publicado por `scene_setup_node`
   (`~/scene_markers`), que sí funciona de forma confiable.
+- **Caso 3 y Caso 4** (`replanning_executor_node`, Fase 2): confirmados en
+  una misma corrida — ver el resumen al inicio de este documento. La pieza
+  clave que lo hizo funcionar
+  fue sembrar el intento de IK de replanificación con la última
+  configuración articular que sí alcanzó el camino cartesiano parcial (no
+  con la posición "de reposo"), y apuntar a un punto interpolado un poco
+  antes del extremo original de la fila en vez del punto exacto — ver los
+  comentarios en `_replan_row` para el detalle completo del diagnóstico.
 
 **Pendiente / no verificado rigurosamente:**
 
@@ -174,14 +190,22 @@ vez de seguir a ciegas.
   muestreo automático que hace el MoveIt Setup Assistant. Correr el Setup
   Assistant localmente (pestaña "Self-Collisions") para regenerarla de forma
   más rigurosa es recomendable antes de reportar resultados finales, aunque
-  no ha causado problemas en las pruebas de los Casos 1 y 2.
-- **Caso 3 (obstáculo dinámico + replanificación automática)**: implementado
-  en `replanning_executor_node` (Sección 5b) pero **no probado en VM
-  todavía** — a diferencia de trajectory_planner_node (Fase 1), este nodo no
-  se ha ejecutado ni una vez en un entorno real con ROS. Espera errores en
-  la primera corrida (nombres de servicio/acción como `compute_ik` o
-  `move_action`, campos de `moveit_msgs/action/MoveGroup` mal poblados,
-  etc.) y repórtalos igual que se hizo con la Fase 1.
+  no ha causado problemas en las pruebas de los Casos 1 a 4.
+- **Detección de colisión discreta, no continua**: tanto `trajectory_planner_node`
+  como `replanning_executor_node` revisan la escena una sola vez por fila,
+  justo antes de empezar a moverla (coincide con el diseño explícito del
+  reporte, Tabla IX: "Replanning type: Discrete/reactive"). Si el obstáculo
+  se moviera **a mitad de una fila** en ejecución, no se detectaría hasta
+  que esa fila termine. Un sistema con monitoreo continuo necesitaría
+  revisar la escena durante la ejecución, no solo antes de cada segmento.
+- **`perception_sim_node` no está conectado a la planificación todavía**: el
+  nodo de "cámara RGB-D simulada" publica `structure_pose`/`obstacle_pose`/
+  `workspace_clear`, pero ni `trajectory_planner_node` ni
+  `replanning_executor_node` los suscriben — ambos leen la posición del
+  obstáculo directo de los parámetros de `scene_setup_node`. Para que el
+  "sensor" simulado realmente informe la decisión de replanificación (en
+  vez de solo existir en paralelo), habría que hacer que estos nodos
+  suscriban esos tópicos en lugar de leer los parámetros directamente.
 - Errores cosméticos que persisten en los logs sin afectar el funcionamiento:
   advertencia "No 3D sensor plugin(s) defined for octomap updates" (no
   usamos octomap) y "unrealistic inertia" por eslabón (RViz avisando que no

@@ -8,13 +8,22 @@ MoveIt 2 del robot ABB IRB 2600, reutilizando URDF/mallas de
 (`external/IRB2600-ABB` en la raíz del repo, ROS 1 Noetic) como base
 geométrica.
 
-**Importante:** este workspace fue escrito y verificado sintácticamente en un
-entorno sin ROS instalado (no hay `/opt/ros`, `colcon` ni `catkin_make`
-disponibles aquí). Todo el xacro/YAML/Python sigue las convenciones estándar
-de ROS 2 Humble + MoveIt 2 (Setup Assistant / `moveit_configs_utils`), pero
-**no se pudo compilar ni lanzar realmente** — la primera vez que lo corras en
-una máquina con ROS 2 es esperable tener que ajustar algo. Ver "Qué falta
-validar" más abajo.
+**Estado:** desarrollado originalmente en un entorno sin ROS instalado (solo
+verificado sintácticamente), y desde entonces **validado de punta a punta en
+una VM con Ubuntu 22.04 + ROS 2 Humble** (2026-07-26). Ver la Sección 6 para
+el detalle de qué se confirmó funcionando y qué sigue pendiente de revisión
+más rigurosa.
+
+### Resultados de validación en VM (2026-07-26)
+
+- **Caso 1** (Tabla XVII — sin obstáculo bloqueando): `fraction=1.000`,
+  cobertura completa del panel, trayectoria ejecutada con éxito.
+- **Caso 2** (Tabla XVII — obstáculo bloquea parcialmente): `fraction=0.133`,
+  el robot se detiene antes de tocar el obstáculo (confirmado numérica y
+  visualmente en RViz). El sistema reporta la colisión en vez de ejecutar a
+  ciegas, tal como especifica la Tabla VI ("Check collisions"). La
+  replanificación automática alrededor del obstáculo (Caso 3, obstáculo
+  dinámico) sigue sin implementarse — ver Sección 1.
 
 ## 1. Alcance de esta fase
 
@@ -77,14 +86,17 @@ source install/setup.bash
    ros2 launch irb2600_moveit_config demo.launch.py
    ```
    Nota: el panel interactivo `moveit_rviz_plugin/MotionPlanning` (el de
-   arrastrar-y-planificar) tiene un bug conocido y no resuelto en varias
-   instalaciones de ROS 2 Humble/MoveIt 2 (falla al cargar el modelo del robot
-   con un error de tipos en `joint_limits`; ver
+   arrastrar-y-planificar) y el display `moveit_rviz_plugin/PlanningScene`
+   tienen bugs conocidos y no resueltos en esta instalación de ROS 2
+   Humble/MoveIt 2 (fallan al cargar el modelo del robot / nunca se
+   suscriben al topic de la escena; ver
    [moveit2#1596](https://github.com/moveit/moveit2/issues/1596),
    [ros2/rviz#808](https://github.com/ros2/rviz/issues/808)), así que no se
-   incluye en `config/moveit.rviz` — solo verás el robot y la escena, sin ese
-   panel. La planificación/ejecución real de trayectorias se hace por código
-   con `trajectory_planner_node` (paso 4), que nunca dependió de ese panel.
+   usan en `config/moveit.rviz` — el robot se ve vía `RobotModel` normal, y
+   los objetos de la escena vía un `MarkerArray` propio publicado por
+   `scene_setup_node` (ver Sección 6). La planificación/ejecución real de
+   trayectorias se hace por código con `trajectory_planner_node` (paso 4),
+   que nunca dependió de ninguno de esos plugins.
 3. **Celda completa** (MoveIt + panel + obstáculo + percepción simulada + `spray_on`):
    ```bash
    ros2 launch irb2600_coating_cell coating_cell_bringup.launch.py
@@ -105,32 +117,41 @@ ros2 param set /scene_setup_node obstacle.position "[0.5, 0.1, 1.0]"
 ros2 service call /scene_setup_node/refresh_scene std_srvs/srv/Trigger
 ```
 
-## 6. Qué falta validar (no se pudo probar en este entorno)
+## 6. Qué se validó en VM y qué sigue pendiente
 
-- **Build de `colcon`**: nombres de paquetes/dependencias en los `package.xml`
-  no se verificaron contra `rosdep`. Si `rosdep install` o `colcon build`
-  fallan por un nombre de paquete, es lo primero a revisar.
-- **Alcanzabilidad del panel**: la posición del panel objetivo y del
-  obstáculo en `irb2600_coating_cell/config/scene_objects.yaml` son valores
-  de primera aproximación (no verificados contra el volumen de trabajo real
-  del IRB 2600, hasta 1.85 m según la Tabla VII). Si MoveIt no encuentra
-  solución IK, ajustar `target_structure.position`/`obstacle.position` ahí.
+**Confirmado funcionando (Ubuntu 22.04 + ROS 2 Humble, 2026-07-26):**
+
+- `colcon build` compila los 3 paquetes sin errores de dependencias.
+- `display.launch.py`, `demo.launch.py` y `coating_cell_bringup.launch.py`
+  levantan correctamente (robot, `move_group`, `ros2_control`, escena).
+- **Alcanzabilidad del panel**: confirmada — Caso 1 cubre el 100% del panel
+  (`fraction=1.000`) con la posición actual en
+  `irb2600_coating_cell/config/scene_objects.yaml`.
+- **Orientación de la boquilla**: corregida (el vector de aproximación apunta
+  hacia la superficie, antiparalelo a la normal saliente `n̂s`; si se calcula
+  `theta_error` de la ec. 9 como métrica más adelante, debe medirse contra
+  `-n̂s`).
+- **Visualización de la escena**: `moveit_rviz_plugin/PlanningScene` nunca se
+  suscribe a `/monitored_planning_scene` en esta instalación (confirmado con
+  `ros2 topic info`: 1 publisher, 0 subscribers) — se reemplazó por un
+  `MarkerArray` propio publicado por `scene_setup_node`
+  (`~/scene_markers`), que sí funciona de forma confiable.
+
+**Pendiente / no verificado rigurosamente:**
+
 - **Matriz de colisiones permitidas (ACM)** en `irb2600_moveit_config/config/irb2600.srdf`:
   se completó a mano solo con pares de eslabones adyacentes, siguiendo el
   mismo patrón que las configuraciones ROS 1 originales de RAMEL. No es el
   muestreo automático que hace el MoveIt Setup Assistant. Correr el Setup
   Assistant localmente (pestaña "Self-Collisions") para regenerarla de forma
-  más rigurosa es recomendable antes de reportar resultados finales.
-- ~~Convención de orientación de la boquilla~~ **Corregido y validado en VM**:
-  la primera versión orientaba el eje Z de la boquilla paralelo a la normal
-  *saliente* de la superficie (ec. 9 leída literalmente), es decir, apuntando
-  hacia el robot en vez de hacia el panel. En la práctica esto dejaba casi
-  toda la trayectoria fuera de alcance (`fraction≈0`, confirmado con
-  `avoid_collisions:=false` y con distintos `tcp_link`, descartando colisión
-  o el link usado como causa). Se corrigió para que el vector de aproximación
-  apunte *hacia* la superficie (antiparalelo a `n̂s`), como cualquier boquilla
-  real — si más adelante se calcula `theta_error` (ec. 9) como métrica, debe
-  medirse contra `-n̂s`, no contra `n̂s` directamente.
+  más rigurosa es recomendable antes de reportar resultados finales, aunque
+  no ha causado problemas en las pruebas de los Casos 1 y 2.
+- **Caso 3 (obstáculo dinámico + replanificación automática)**: no
+  implementado — ver Sección 1.
+- Errores cosméticos que persisten en los logs sin afectar el funcionamiento:
+  advertencia "No 3D sensor plugin(s) defined for octomap updates" (no
+  usamos octomap) y "unrealistic inertia" por eslabón (RViz avisando que no
+  puede dibujar una caja de inercia auxiliar; no afecta física ni planificación).
 
 ## 7. Créditos
 

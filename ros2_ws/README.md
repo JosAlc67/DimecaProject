@@ -43,18 +43,36 @@ más rigurosa.
   obstáculos con nombre descrita abajo — la mecánica es la misma, solo
   cambia que ahora cada obstáculo tiene su propio nombre/tópico en vez de
   ser el único `obstacle`.)
-- **Entorno con varios obstáculos con nombre** (implementado, **sin probar
-  en VM todavía**): `config/scene_objects.yaml` ahora define una lista
-  `obstacles: ["scaffold_pole", "tool_cart", "cable_reel"]` en vez de un
-  único obstáculo — un poste de andamio (cilindro alto y delgado), un
-  carrito de herramientas (caja a media altura) y un carrete de cable
-  (cilindro bajo, pensado para quedar mayormente libre), representando el
+- **Entorno con varios obstáculos con nombre**: **validado en VM**.
+  `config/scene_objects.yaml` define `obstacles: ["scaffold_pole",
+  "tool_cart", "cable_reel"]` en vez de un único obstáculo — un poste de
+  andamio (cilindro alto y delgado), un carrito de herramientas (caja a
+  media altura) y un carrete de cable (cilindro bajo), representando el
   entorno de trabajo desordenado que describe el reporte (Sec. I:
   "scaffolding, tools, wiring, auxiliary equipment"). Cada nombre tiene sus
   propios parámetros `<nombre>.type/frame_id/position/orientation_rpy/size`,
   y `perception_sim_node` publica la pose de cada uno en
-  `/obstacles/<nombre>/pose`. Repórtame errores en la primera corrida, igual
-  que con todo lo anterior.
+  `/obstacles/<nombre>/pose`. Corrida completa de `replanning_executor_node`
+  sobre las 6 filas con los 3 obstáculos activos: **4 filas directas, 2
+  replanificadas con éxito, 0 fallos** — el mejor resultado de todas las
+  pruebas hasta ahora, con el escenario más realista.
+- **Espaciado y alcance**: el panel y los obstáculos se alejaron varias
+  veces por feedback visual (se veían "pegados" al robot) hasta usar más
+  del alcance real de hasta 1.85 m (Tabla VII) sin llegar al límite: panel
+  en x=1.8, obstáculos en un anillo de ~1.3-1.4 m de radio. Se agregó un
+  punto amarillo marcando el centro del panel objetivo.
+- **Reintentos de replanificación con márgenes crecientes**: un solo margen
+  de retroceso fijo no bastaba cuando un obstáculo corre a lo largo de un
+  tramo más largo de la fila (no solo toca la punta) — `_replan_row` ahora
+  prueba varios márgenes (5%, 10%, 20%, 35%) antes de reportar fallo. Esto
+  fue lo que permitió pasar de fallos en la Fila 2 a la corrida perfecta
+  mencionada arriba.
+- **`go_home_node`**: nuevo utilitario para devolver el brazo a la posición
+  de reposo (todas las articulaciones en 0) sin reiniciar
+  `coating_cell_bringup.launch.py` completo:
+  ```bash
+  ros2 run irb2600_coating_cell go_home_node
+  ```
 
 ## 1. Alcance de esta fase
 

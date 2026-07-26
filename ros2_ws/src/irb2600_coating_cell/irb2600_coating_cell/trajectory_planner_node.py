@@ -125,8 +125,21 @@ class TrajectoryPlannerNode(Node):
 
                 pose = Pose()
                 pose.position.x, pose.position.y, pose.position.z = x, y, z
-                # eq. 9: tool Z axis parallel to the surface normal.
-                pose.orientation = quaternion_with_z_axis(normal_world)
+                # Physically, the nozzle's approach vector must point INTO
+                # the surface (like any real spray/weld/machining tool),
+                # i.e. antiparallel to the outward surface normal n_s used
+                # for the standoff offset above -- NOT parallel to it, even
+                # though eq. 9 (theta_error = arccos(z_e . n_s) <= 10 deg)
+                # reads as if z_e should equal n_s directly. Using +n_s here
+                # (tool pointing away from the panel, back over its own
+                # shoulder) was tested and made nearly the entire raster
+                # kinematically unreachable (fraction ~0 with IK/collision
+                # both failing regardless of the obstacle). Whichever
+                # eventually computes eq. 9 as a reported metric should
+                # measure the angle against -n_s (equivalently, against the
+                # surface's inward normal) to match this convention.
+                approach_direction = tuple(-c for c in normal_world)
+                pose.orientation = quaternion_with_z_axis(approach_direction)
                 waypoints.append(pose)
 
         return waypoints, normal_world

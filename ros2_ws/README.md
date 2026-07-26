@@ -121,12 +121,16 @@ ros2 service call /scene_setup_node/refresh_scene std_srvs/srv/Trigger
   muestreo automático que hace el MoveIt Setup Assistant. Correr el Setup
   Assistant localmente (pestaña "Self-Collisions") para regenerarla de forma
   más rigurosa es recomendable antes de reportar resultados finales.
-- **Convención de orientación de la boquilla** (`ẑe` paralelo a `n̂s`, ec. 9
-  del reporte): implementada literalmente como "eje Z local de la boquilla
-  apunta en la misma dirección que la normal saliente de la superficie". Es
-  una elección de convención razonable pero no verificada visualmente —
-  confirmar en RViz que la boquilla efectivamente mira hacia el panel al
-  correr `trajectory_planner_node`.
+- ~~Convención de orientación de la boquilla~~ **Corregido y validado en VM**:
+  la primera versión orientaba el eje Z de la boquilla paralelo a la normal
+  *saliente* de la superficie (ec. 9 leída literalmente), es decir, apuntando
+  hacia el robot en vez de hacia el panel. En la práctica esto dejaba casi
+  toda la trayectoria fuera de alcance (`fraction≈0`, confirmado con
+  `avoid_collisions:=false` y con distintos `tcp_link`, descartando colisión
+  o el link usado como causa). Se corrigió para que el vector de aproximación
+  apunte *hacia* la superficie (antiparalelo a `n̂s`), como cualquier boquilla
+  real — si más adelante se calcula `theta_error` (ec. 9) como métrica, debe
+  medirse contra `-n̂s`, no contra `n̂s` directamente.
 
 ## 7. Créditos
 

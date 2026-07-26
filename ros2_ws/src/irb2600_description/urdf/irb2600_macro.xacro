@@ -1,6 +1,12 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <robot xmlns:xacro="http://ros.org/wiki/xacro">
-  <xacro:include filename="$(find irb2600_description)/urdf/materials.xacro"/>
+  <!--
+    Note: does NOT xacro:include materials.xacro here -- it must be included
+    exactly once by whichever top-level file assembles the robot (see
+    irb2600.urdf.xacro), otherwise urdfdom rejects the duplicated
+    'abb_orange' material definition. This file only uses the
+    material_abb_orange macro, assuming it is already defined.
+  -->
 
   <!--
     ROS 2 port of RAMEL-ESPOL/IRB2600-ABB irb2600_description/urdf/irb2600_macro.xacro.

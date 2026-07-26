@@ -1,0 +1,41 @@
+# Shared source of truth for the target structure (aerospace panel, Table VIII)
+# and the temporary obstacle (Table VIII / Table XVII Case 2), loaded by both
+# scene_setup_node (planning-scene collision objects) and perception_sim_node
+# (simulated structure_pose / obstacle_pose / surface_normal topics), so the
+# two views of the scene never drift apart.
+#
+# These are first-pass placement values, not measured/validated against the
+# real IRB 2600 reach envelope (Table VII: up to 1.85 m). Once this is
+# launched on a machine with ROS 2 + RViz, check in the MotionPlanning
+# display that the panel is actually reachable and adjust here if not.
+/**:
+  ros__parameters:
+    target_structure:
+      frame_id: "world"
+      # Panel center. Box is thin along local X; the report's 1.0 x 0.6 m
+      # useful area (Table VIII) is modeled as width along Y, height along Z.
+      position: [1.0, 0.0, 1.0]
+      orientation_rpy: [0.0, 0.0, 0.0]
+      size: [0.02, 1.0, 0.6]
+      # Outward normal in the panel's own local frame (rotated by
+      # orientation_rpy to get the world-frame surface_normal). With the
+      # identity orientation above, the panel occupies local +X and opens
+      # towards the robot at local -X.
+      local_normal: [-1.0, 0.0, 0.0]
+
+    obstacle:
+      frame_id: "world"
+      type: "box" # "box" or "cylinder" (Table VIII: "Temporary prism or cylinder")
+      # Partially blocks the direct robot-to-panel path (Table XVII Case 2),
+      # without fully covering it (Case 4 would be a bigger/centered obstacle).
+      position: [0.5, 0.3, 1.0]
+      orientation_rpy: [0.0, 0.0, 0.0]
+      size: [0.15, 0.15, 0.8] # box: [x, y, z]; cylinder: [height, radius, 0.0]
+
+    # Table IX: minimum obstacle distance dsafe >= 0.05 m. Used by
+    # perception_sim_node's workspace_clear heuristic together with an extra
+    # margin for the robot/tool footprint (not physically simulated, just a
+    # coarse proxy since real point-cloud processing is out of scope, Sec.
+    # III-B).
+    d_safe: 0.05
+    workspace_clear_margin: 0.15

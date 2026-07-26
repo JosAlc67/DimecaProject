@@ -1,0 +1,38 @@
+# Velocity limits taken directly from irb2600_description/urdf/irb2600_macro.xacro
+# (same numeric values as the original RAMEL-ESPOL ROS 1 URDF). Acceleration
+# limits have no source in the manufacturer data collected so far (report
+# Table XIII does not include them); they are set to 2x the velocity limit as
+# a conservative placeholder, consistent with the report's own note that
+# "indicated values correspond to initial design assumptions ... and may be
+# adjusted during simulation" (Sec. IV-D).
+joint_limits:
+  joint_1:
+    has_velocity_limits: true
+    max_velocity: 3.054
+    has_acceleration_limits: true
+    max_acceleration: 6.108
+  joint_2:
+    has_velocity_limits: true
+    max_velocity: 3.054
+    has_acceleration_limits: true
+    max_acceleration: 6.108
+  joint_3:
+    has_velocity_limits: true
+    max_velocity: 3.054
+    has_acceleration_limits: true
+    max_acceleration: 6.108
+  joint_4:
+    has_velocity_limits: true
+    max_velocity: 6.283
+    has_acceleration_limits: true
+    max_acceleration: 12.566
+  joint_5:
+    has_velocity_limits: true
+    max_velocity: 6.283
+    has_acceleration_limits: true
+    max_acceleration: 12.566
+  joint_6:
+    has_velocity_limits: true
+    max_velocity: 8.727
+    has_acceleration_limits: true
+    max_acceleration: 17.454

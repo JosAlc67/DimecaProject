@@ -1,0 +1,23 @@
+<?xml version="1.0"?>
+<robot name="abb_irb2600_coating_cell" xmlns:xacro="http://ros.org/wiki/xacro">
+
+  <!--
+    ROS 2 equivalent of RAMEL-ESPOL/IRB2600-ABB irb2600_description/urdf/irb2600_main.xacro,
+    trimmed to what the DIMECA coating-cell digital prototype needs: the bare robot on
+    its pedestal plus the spray-nozzle end effector. Table/wall/other tool variants from
+    the original file were dropped; the target structure and obstacle are NOT part of
+    this URDF (they are inserted as collision objects into the MoveIt planning scene at
+    runtime by irb2600_coating_cell, since the report treats the obstacle as dynamic).
+  -->
+
+  <link name="world"/>
+
+  <xacro:include filename="$(find irb2600_description)/urdf/irb2600_macro.xacro"/>
+  <xacro:include filename="$(find irb2600_description)/urdf/robot_base.xacro"/>
+  <xacro:include filename="$(find irb2600_description)/urdf/spray_nozzle.xacro"/>
+  <xacro:include filename="$(find irb2600_description)/urdf/ros2_control.xacro"/>
+
+  <xacro:abb_irb2600 prefix=""/>
+  <xacro:abb_irb2600_ros2_control prefix=""/>
+
+</robot>

@@ -61,6 +61,12 @@ class TrajectoryPlannerNode(Node):
         self.declare_parameter("group_name", "manipulator")
         self.declare_parameter("tcp_link", "nozzle_tip")
         self.declare_parameter("execute", False)
+        # Diagnostic switch: set to false to ask compute_cartesian_path to
+        # ignore collisions entirely. If fraction jumps to ~1.0 with this
+        # off, the low fraction was a (self-)collision; if it stays low
+        # even with collision checking off, it's an IK/reachability
+        # problem with the requested waypoint poses instead.
+        self.declare_parameter("avoid_collisions", True)
 
         self._cartesian_path_client = self.create_client(
             GetCartesianPath, "compute_cartesian_path"
@@ -136,7 +142,7 @@ class TrajectoryPlannerNode(Node):
         request.waypoints = waypoints
         request.max_step = float(self.get_parameter("max_step").value)
         request.jump_threshold = 0.0
-        request.avoid_collisions = True
+        request.avoid_collisions = bool(self.get_parameter("avoid_collisions").value)
         request.start_state.is_diff = True
 
         future = self._cartesian_path_client.call_async(request)

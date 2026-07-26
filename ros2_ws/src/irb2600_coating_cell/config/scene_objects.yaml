@@ -15,10 +15,12 @@
       frame_id: "world"
       # Panel center. Box is thin along local X; the report's 1.0 x 0.6 m
       # useful area (Table VIII) is modeled as width along Y, height along Z.
-      # Pushed out to x=1.5 (report Table VII: up to 1.85 m reach) to leave
-      # the arm real room to maneuver between the base, the obstacles, and
-      # the panel instead of everything being crammed within ~1 m.
-      position: [1.5, 0.0, 1.0]
+      # Pushed out to x=1.8 (report Table VII: up to 1.85 m reach -- with
+      # d_standoff=0.20 the farthest raster waypoint corner sits at a
+      # radial distance of ~1.65 m from the base, still ~0.2 m short of
+      # max reach) to leave the arm real room to maneuver between the
+      # base, the obstacles, and the panel.
+      position: [1.8, 0.0, 1.0]
       orientation_rpy: [0.0, 0.0, 0.0]
       size: [0.02, 1.0, 0.6]
       # Outward normal in the panel's own local frame (rotated by
@@ -35,11 +37,11 @@
     # each one's pose on its own topic (/obstacles/<name>/pose).
     obstacles: ["scaffold_pole", "tool_cart", "cable_reel"]
 
-    # All three obstacles sit on a ~1.0-1.12 m radius ring around the robot
+    # All three obstacles sit on a ~1.3-1.42 m radius ring around the robot
     # base (world origin) -- clearly clear of the pedestal (footprint
     # roughly 0.4-0.5 m) and roughly midway to the panel/its standoff
-    # waypoints (~x=1.29 m for the default d_standoff=0.20 with the panel
-    # at x=1.5), spread apart angularly so the arm has real room to swing
+    # waypoints (~x=1.59 m for the default d_standoff=0.20 with the panel
+    # at x=1.8), spread apart angularly so the arm has real room to swing
     # between the base, each obstacle, and the panel, all still comfortably
     # inside the up-to-1.85 m reach (Table VII).
 
@@ -48,7 +50,7 @@
     scaffold_pole:
       type: "cylinder"
       frame_id: "world"
-      position: [1.0, 0.5, 1.05]
+      position: [1.25, 0.55, 1.05]
       orientation_rpy: [0.0, 0.0, 0.0]
       size: [0.9, 0.04, 0.0] # cylinder: [height, radius, unused]
 
@@ -57,7 +59,7 @@
     tool_cart:
       type: "box"
       frame_id: "world"
-      position: [1.0, -0.5, 0.55]
+      position: [1.25, -0.55, 0.55]
       orientation_rpy: [0.0, 0.0, 0.0]
       size: [0.35, 0.35, 0.55] # box: [x, y, z]
 
@@ -68,7 +70,7 @@
     cable_reel:
       type: "cylinder"
       frame_id: "world"
-      position: [1.0, 0.0, 0.3]
+      position: [1.3, 0.0, 0.3]
       orientation_rpy: [0.0, 0.0, 0.0]
       size: [0.3, 0.15, 0.0]
 

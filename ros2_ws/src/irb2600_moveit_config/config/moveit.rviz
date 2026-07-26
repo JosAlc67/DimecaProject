@@ -59,13 +59,13 @@ Visualization Manager:
   Views:
     Current:
       # Framed to show the pedestal, the full arm reach, the target
-      # structure (centered at x=1.0) and the temporary obstacle
-      # (x=0.5, y=0.3) together by default -- see
+      # structure (x=1.8) and the temporary obstacles (~1.3 m ring)
+      # together by default -- see
       # irb2600_coating_cell/config/scene_objects.yaml for those poses.
       Class: rviz_default_plugins/Orbit
-      Distance: 4.5
+      Distance: 7.0
       Focal Point:
-        X: 0.5
+        X: 0.9
         Y: 0.0
         Z: 0.9
       Yaw: 0.9

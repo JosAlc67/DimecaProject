@@ -1,13 +1,14 @@
 # Shared source of truth for the target structure (aerospace panel, Table VIII)
-# and the temporary obstacle (Table VIII / Table XVII Case 2), loaded by both
+# and the temporary obstacles (Table VIII / Table XVII Cases 2-4: "temporary
+# scaffolding, tools, wiring, auxiliary equipment", Sec. I), loaded by both
 # scene_setup_node (planning-scene collision objects) and perception_sim_node
-# (simulated structure_pose / obstacle_pose / surface_normal topics), so the
-# two views of the scene never drift apart.
+# (simulated structure_pose / obstacles/*/pose / surface_normal topics), so
+# the two views of the scene never drift apart.
 #
 # These are first-pass placement values, not measured/validated against the
 # real IRB 2600 reach envelope (Table VII: up to 1.85 m). Once this is
-# launched on a machine with ROS 2 + RViz, check in the MotionPlanning
-# display that the panel is actually reachable and adjust here if not.
+# launched on a machine with ROS 2 + RViz, check that the panel and the
+# space around it are actually reachable and adjust here if not.
 /**:
   ros__parameters:
     target_structure:
@@ -23,14 +24,42 @@
       # towards the robot at local -X.
       local_normal: [-1.0, 0.0, 0.0]
 
-    obstacle:
+    # Named list of temporary obstacles. Each name below must also have its
+    # own <name>.type/frame_id/position/orientation_rpy/size block -- this is
+    # the standard ROS 2 pattern for a dynamic list of named sub-configs
+    # (no native "list of structs" parameter type). scene_setup_node inserts
+    # one CollisionObject per name (id = name); perception_sim_node publishes
+    # each one's pose on its own topic (/obstacles/<name>/pose).
+    obstacles: ["scaffold_pole", "tool_cart", "cable_reel"]
+
+    # A vertical scaffolding pole: tall and thin, spans most of the panel
+    # height. The one most likely to block a coating pass outright.
+    scaffold_pole:
+      type: "cylinder"
       frame_id: "world"
-      type: "box" # "box" or "cylinder" (Table VIII: "Temporary prism or cylinder")
-      # Partially blocks the direct robot-to-panel path (Table XVII Case 2),
-      # without fully covering it (Case 4 would be a bigger/centered obstacle).
-      position: [0.5, 0.3, 1.0]
+      position: [0.55, 0.3, 1.05]
       orientation_rpy: [0.0, 0.0, 0.0]
-      size: [0.15, 0.15, 0.8] # box: [x, y, z]; cylinder: [height, radius, 0.0]
+      size: [0.9, 0.04, 0.0] # cylinder: [height, radius, unused]
+
+    # A waist-height tool cart on the opposite side of the panel: a coarse
+    # box, low enough to only matter for the bottom rows.
+    tool_cart:
+      type: "box"
+      frame_id: "world"
+      position: [0.55, -0.3, 0.55]
+      orientation_rpy: [0.0, 0.0, 0.0]
+      size: [0.35, 0.35, 0.55] # box: [x, y, z]
+
+    # A cable reel near the floor/pedestal: small and low, meant to sit
+    # mostly clear of the panel's work envelope -- included so the scene
+    # isn't just "obstacles that block everything", matching a cluttered but
+    # not impassable real work area.
+    cable_reel:
+      type: "cylinder"
+      frame_id: "world"
+      position: [0.35, 0.0, 0.35]
+      orientation_rpy: [0.0, 0.0, 0.0]
+      size: [0.3, 0.15, 0.0]
 
     # Table IX: minimum obstacle distance dsafe >= 0.05 m. Used by
     # perception_sim_node's workspace_clear heuristic together with an extra

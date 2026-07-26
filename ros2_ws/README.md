@@ -34,11 +34,27 @@ más rigurosa.
 - **Caso 4** (obstáculo bloquea el acceso por completo): confirmado junto
   con el Caso 3 arriba (Fila 4).
 - **Percepción simulada conectada de verdad**: `scene_setup_node` ahora
-  reacciona automáticamente a `/obstacle_pose` de `perception_sim_node` (sin
-  paso manual de `refresh_scene`) — confirmado moviendo el obstáculo con
-  `ros2 param set /perception_sim_node obstacle.position ...` durante una
-  pausa entre filas y viendo cómo la siguiente fila reaccionó al nuevo
-  bloqueo en tiempo real.
+  reacciona automáticamente a `/obstacles/<nombre>/pose` de
+  `perception_sim_node` (sin paso manual de `refresh_scene`) — confirmado
+  moviendo el obstáculo con `ros2 param set /perception_sim_node
+  <nombre>.position ...` durante una pausa entre filas y viendo cómo la
+  siguiente fila reaccionó al nuevo bloqueo en tiempo real. (Esta prueba se
+  hizo con un solo obstáculo, antes de generalizar a la lista de varios
+  obstáculos con nombre descrita abajo — la mecánica es la misma, solo
+  cambia que ahora cada obstáculo tiene su propio nombre/tópico en vez de
+  ser el único `obstacle`.)
+- **Entorno con varios obstáculos con nombre** (implementado, **sin probar
+  en VM todavía**): `config/scene_objects.yaml` ahora define una lista
+  `obstacles: ["scaffold_pole", "tool_cart", "cable_reel"]` en vez de un
+  único obstáculo — un poste de andamio (cilindro alto y delgado), un
+  carrito de herramientas (caja a media altura) y un carrete de cable
+  (cilindro bajo, pensado para quedar mayormente libre), representando el
+  entorno de trabajo desordenado que describe el reporte (Sec. I:
+  "scaffolding, tools, wiring, auxiliary equipment"). Cada nombre tiene sus
+  propios parámetros `<nombre>.type/frame_id/position/orientation_rpy/size`,
+  y `perception_sim_node` publica la pose de cada uno en
+  `/obstacles/<nombre>/pose`. Repórtame errores en la primera corrida, igual
+  que con todo lo anterior.
 
 ## 1. Alcance de esta fase
 
@@ -127,22 +143,25 @@ source install/setup.bash
    ros2 run irb2600_coating_cell trajectory_planner_node --ros-args -p execute:=true
    ```
 
-Para mover el obstáculo (probar manualmente el Caso 2 con otra posición),
-`scene_setup_node` está suscrito a `/obstacle_pose` de `perception_sim_node`
-y vuelve a aplicar la escena automáticamente en cuanto cambia — basta con:
+Para mover un obstáculo (probar manualmente el Caso 2 con otra posición),
+`scene_setup_node` está suscrito a `/obstacles/<nombre>/pose` de
+`perception_sim_node` y vuelve a aplicar la escena automáticamente en
+cuanto cambia — basta con (nombres por defecto: `scaffold_pole`,
+`tool_cart`, `cable_reel`; `ros2 param list /perception_sim_node` para
+verlos):
 ```bash
-ros2 param set /perception_sim_node obstacle.position "[0.5, 0.1, 1.0]"
+ros2 param set /perception_sim_node scaffold_pole.position "[0.5, 0.1, 1.0]"
 ```
 (Si corres `scene_setup_node` sin `perception_sim_node`, usa el método
-manual como respaldo: `ros2 param set /scene_setup_node obstacle.position
+manual como respaldo: `ros2 param set /scene_setup_node scaffold_pole.position
 "[...]"` seguido de `ros2 service call /scene_setup_node/refresh_scene
 std_srvs/srv/Trigger`.)
 
 ## 5b. Probar el Caso 3 (obstáculo dinámico + replanificación)
 
-Con la celda completa corriendo (paso 3), y el obstáculo en una posición que
-bloquee alguna fila del panel (por ejemplo la posición por defecto
-`[0.5, 0.3, 1.0]`), corre:
+Con la celda completa corriendo (paso 3), y algún obstáculo en una posición
+que bloquee alguna fila del panel (por ejemplo la posición por defecto de
+`scaffold_pole`, `[0.55, 0.3, 1.05]`), corre:
 
 ```bash
 ros2 run irb2600_coating_cell replanning_executor_node --ros-args -p execute:=true
@@ -155,7 +174,7 @@ mano y ver cómo reacciona la siguiente fila:
 
 ```bash
 # En otra terminal, durante la pausa entre filas:
-ros2 param set /perception_sim_node obstacle.position "[0.79, 0.0, 1.0]"
+ros2 param set /perception_sim_node scaffold_pole.position "[0.79, 0.0, 1.0]"
 ```
 
 Al final imprime un resumen (`Summary: N row(s) direct, M row(s) replanned,
@@ -190,11 +209,12 @@ vez de seguir a ciegas.
   con la posición "de reposo"), y apuntar a un punto interpolado un poco
   antes del extremo original de la fila en vez del punto exacto — ver los
   comentarios en `_replan_row` para el detalle completo del diagnóstico.
-- **Sensor simulado conectado a la escena**: **validado en VM**.
-  `scene_setup_node` se suscribe a `/obstacle_pose` de `perception_sim_node`
-  y vuelve a aplicar la escena automáticamente cuando la posición del
-  obstáculo cambia — confirmado visualmente (la caja se movió sola en RViz
-  al cambiar `ros2 param set /perception_sim_node obstacle.position ...`,
+- **Sensor simulado conectado a la escena**: **validado en VM** (con un solo
+  obstáculo, antes de generalizar a la lista con nombre de la sección
+  anterior). `scene_setup_node` se suscribe a la pose del obstáculo
+  publicada por `perception_sim_node` y vuelve a aplicar la escena
+  automáticamente cuando cambia — confirmado visualmente (la caja se movió
+  sola en RViz al cambiar el parámetro de posición en `perception_sim_node`,
   sin llamar a `refresh_scene`) y funcionalmente: en la misma corrida, mover
   el obstáculo a mitad de la pausa entre filas hizo que la Fila 2
   reaccionara al nuevo bloqueo (detectado casi de inmediato,

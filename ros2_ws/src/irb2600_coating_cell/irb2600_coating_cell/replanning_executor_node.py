@@ -30,13 +30,16 @@ you can trigger a "controlled change in obstacle position" during that
 window (Table IX: "Replanning type: Discrete/reactive") and watch the next
 row react to it:
 
-    ros2 param set /perception_sim_node obstacle.position "[X, Y, Z]"
+    ros2 param set /perception_sim_node scaffold_pole.position "[X, Y, Z]"
 
-scene_setup_node now subscribes to perception_sim_node's /obstacle_pose and
-re-applies the planning scene automatically when it changes, so that one
-command is enough -- no more manual refresh_scene call needed (that
-combination is still available as a fallback if perception_sim_node isn't
-running, see scene_setup_node's docstring).
+(or tool_cart/cable_reel -- the default obstacle names in
+config/scene_objects.yaml; run `ros2 param list /perception_sim_node` to
+see the actual names for your scene). scene_setup_node subscribes to
+perception_sim_node's /obstacles/<name>/pose topics and re-applies the
+planning scene automatically when any of them changes, so that one command
+is enough -- no more manual refresh_scene call needed (that combination is
+still available as a fallback if perception_sim_node isn't running, see
+scene_setup_node's docstring).
 
     ros2 run irb2600_coating_cell replanning_executor_node --ros-args -p execute:=true
 """
@@ -142,8 +145,8 @@ class ReplanningExecutorNode(Node):
             if idx < n_rows - 1:
                 self.get_logger().info(
                     f"Row {idx + 1} done. Pausing {segment_pause_s:.1f}s before "
-                    "the next row -- move the obstacle now to test Case 3, e.g.:\n"
-                    '  ros2 param set /perception_sim_node obstacle.position "[0.79, 0.0, 1.0]"'
+                    "the next row -- move an obstacle now to test Case 3, e.g.:\n"
+                    '  ros2 param set /perception_sim_node scaffold_pole.position "[0.79, 0.0, 1.0]"'
                 )
                 time.sleep(segment_pause_s)
 

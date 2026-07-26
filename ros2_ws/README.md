@@ -33,6 +33,12 @@ más rigurosa.
   misma corrida.
 - **Caso 4** (obstáculo bloquea el acceso por completo): confirmado junto
   con el Caso 3 arriba (Fila 4).
+- **Percepción simulada conectada de verdad**: `scene_setup_node` ahora
+  reacciona automáticamente a `/obstacle_pose` de `perception_sim_node` (sin
+  paso manual de `refresh_scene`) — confirmado moviendo el obstáculo con
+  `ros2 param set /perception_sim_node obstacle.position ...` durante una
+  pausa entre filas y viendo cómo la siguiente fila reaccionó al nuevo
+  bloqueo en tiempo real.
 
 ## 1. Alcance de esta fase
 
@@ -184,14 +190,16 @@ vez de seguir a ciegas.
   con la posición "de reposo"), y apuntar a un punto interpolado un poco
   antes del extremo original de la fila en vez del punto exacto — ver los
   comentarios en `_replan_row` para el detalle completo del diagnóstico.
-- **Sensor simulado conectado a la escena** (no probado en VM todavía,
-  implementado justo después de la corrida de arriba): `scene_setup_node`
-  ahora se suscribe a `/obstacle_pose` y `/workspace_clear` de
-  `perception_sim_node` y vuelve a aplicar la escena automáticamente cuando
-  la posición del obstáculo cambia — mover el obstáculo ya no requiere el
-  paso manual de `refresh_scene`, solo cambiar el parámetro en
-  `perception_sim_node` (ver Sección 5). Repórtame errores si esto falla en
-  tu próxima corrida, igual que con todo lo anterior.
+- **Sensor simulado conectado a la escena**: **validado en VM**.
+  `scene_setup_node` se suscribe a `/obstacle_pose` de `perception_sim_node`
+  y vuelve a aplicar la escena automáticamente cuando la posición del
+  obstáculo cambia — confirmado visualmente (la caja se movió sola en RViz
+  al cambiar `ros2 param set /perception_sim_node obstacle.position ...`,
+  sin llamar a `refresh_scene`) y funcionalmente: en la misma corrida, mover
+  el obstáculo a mitad de la pausa entre filas hizo que la Fila 2
+  reaccionara al nuevo bloqueo (detectado casi de inmediato,
+  `fraction=0.038`, y reportado como fallo seguro al no haber margen para
+  replanificar — Caso 4 correctamente identificado con la nueva posición).
 
 **Pendiente / no verificado rigurosamente:**
 

@@ -36,3 +36,18 @@ joint_limits:
     max_velocity: 8.727
     has_acceleration_limits: true
     max_acceleration: 17.454
+
+# Merged into this file (instead of a separate pilz_cartesian_limits.yaml)
+# to work around a known MoveItConfigsBuilder bug where .joint_limits() and
+# .pilz_cartesian_limits() both write into the same "robot_description_planning"
+# namespace, and whichever is assembled last in to_moveit_configs() silently
+# overwrites the other instead of merging
+# (https://github.com/moveit/moveit2/issues/1691). Loading both keys from one
+# file sidesteps the overwrite since both builder calls end up with identical
+# content. These values are otherwise unused: only the OMPL pipeline is
+# configured (see launch/*.launch.py), never Pilz.
+cartesian_limits:
+  max_trans_vel: 1.0
+  max_trans_acc: 2.25
+  max_trans_dec: -5.0
+  max_rot_vel: 1.57

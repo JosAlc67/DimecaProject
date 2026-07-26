@@ -27,20 +27,27 @@ Visualization Manager:
       Show Arrows: false
     - Class: moveit_rviz_plugin/PlanningScene
       Name: PlanningScene
-      Enabled: true
+      Enabled: false
+      # Disabled: moveit_rviz_plugin/PlanningScene never subscribes to
+      # /monitored_planning_scene on this ROS 2 Humble install (confirmed
+      # with `ros2 topic info /monitored_planning_scene`: 1 publisher from
+      # move_group, 0 subscribers), so it never rendered anything anyway.
+      # The target_structure/temporary_obstacle collision objects are
+      # instead shown below via a plain MarkerArray published by
+      # scene_setup_node, which does not depend on this plugin.
       Move Group Namespace: ""
       Robot Description: robot_description
       Planning Scene Topic: /monitored_planning_scene
-      # Robot rendering is already covered by the plain RobotModel display
-      # above (which does not go through MoveIt's RobotModelLoader and is
-      # unaffected by the upstream loadRobotModel bug). Disabled here so
-      # this display only renders scene geometry (target structure /
-      # obstacle collision objects), which does not need the robot model.
       Scene Robot:
         Show Robot Visual: false
         Show Robot Collision: false
       Scene Geometry:
         Show Scene Geometry: true
+    - Class: rviz_default_plugins/MarkerArray
+      Name: SceneMarkers
+      Enabled: true
+      Topic:
+        Value: /scene_setup_node/scene_markers
   Global Options:
     Fixed Frame: world
     Background Color: 48; 48; 48

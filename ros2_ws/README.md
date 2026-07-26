@@ -71,10 +71,20 @@ source install/setup.bash
    ```bash
    ros2 launch irb2600_description display.launch.py
    ```
-2. **MoveIt solo** (RViz con el plugin MotionPlanning, hardware mock):
+2. **MoveIt solo** (RViz con el robot + planning scene, hardware mock; confirma
+   que `move_group` y `ros2_control` levantan bien):
    ```bash
    ros2 launch irb2600_moveit_config demo.launch.py
    ```
+   Nota: el panel interactivo `moveit_rviz_plugin/MotionPlanning` (el de
+   arrastrar-y-planificar) tiene un bug conocido y no resuelto en varias
+   instalaciones de ROS 2 Humble/MoveIt 2 (falla al cargar el modelo del robot
+   con un error de tipos en `joint_limits`; ver
+   [moveit2#1596](https://github.com/moveit/moveit2/issues/1596),
+   [ros2/rviz#808](https://github.com/ros2/rviz/issues/808)), así que no se
+   incluye en `config/moveit.rviz` — solo verás el robot y la escena, sin ese
+   panel. La planificación/ejecución real de trayectorias se hace por código
+   con `trajectory_planner_node` (paso 4), que nunca dependió de ese panel.
 3. **Celda completa** (MoveIt + panel + obstáculo + percepción simulada + `spray_on`):
    ```bash
    ros2 launch irb2600_coating_cell coating_cell_bringup.launch.py

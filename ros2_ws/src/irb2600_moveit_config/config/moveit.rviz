@@ -11,14 +11,22 @@ Visualization Manager:
       Enabled: true
       Plane Cell Count: 10
       Cell Size: 0.5
+    - Class: rviz_default_plugins/RobotModel
+      Name: RobotModel
+      Enabled: true
+      Description Topic:
+        Value: /robot_description
+      TF Prefix: ""
+      Visual Enabled: true
+      Collision Enabled: false
     - Class: rviz_default_plugins/TF
       Name: TF
-      Enabled: false
+      Enabled: true
       Show Names: true
       Show Axes: true
       Show Arrows: false
-    - Class: moveit_rviz_plugin/MotionPlanning
-      Name: MotionPlanning
+    - Class: moveit_rviz_plugin/PlanningScene
+      Name: PlanningScene
       Enabled: true
       Move Group Namespace: ""
       Robot Description: robot_description
@@ -26,20 +34,8 @@ Visualization Manager:
       Scene Robot:
         Show Robot Visual: true
         Show Robot Collision: false
-      Planning Request:
-        Planning Group: manipulator
-        Query Start State: false
-        Query Goal State: true
-        Show Workspace: false
-      Planned Path:
-        Show Robot Visual: true
-        Loop Animation: false
-        Trail Step Size: 1
-        State Display Time: 0.05 s
       Scene Geometry:
         Show Scene Geometry: true
-        Voxel Coloring: Z-Axis
-        Voxel Rendering: Occupied Voxels
   Global Options:
     Fixed Frame: world
     Background Color: 48; 48; 48
@@ -63,5 +59,3 @@ Window Geometry:
   Width: 1600
   X: 0
   Y: 0
-  MotionPlanning:
-    collapsed: false

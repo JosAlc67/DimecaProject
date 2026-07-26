@@ -73,6 +73,8 @@ más rigurosa.
   ```bash
   ros2 run irb2600_coating_cell go_home_node
   ```
+- **`gui_control_node`**: panel simple con dos botones ("Go Home", "Start
+  Route") para no tener que escribir comandos por CLI. Ver Sección 5c.
 
 ## 1. Alcance de esta fase
 
@@ -199,6 +201,40 @@ Al final imprime un resumen (`Summary: N row(s) direct, M row(s) replanned,
 ...`). Si una fila queda genuinamente inalcanzable ni replanificando, el nodo
 la reporta como fallo seguro (Caso 4 de la Tabla XVII) y se detiene ahí en
 vez de seguir a ciegas.
+
+## 5c. Panel de control con botones (`gui_control_node`)
+
+Alternativa a los comandos de `go_home_node` / `replanning_executor_node`
+por CLI: una ventana Tkinter con dos botones, "Go Home" y "Start Route". Se
+eligió Tkinter (de la librería estándar de Python) en vez de un panel de
+RViz porque este workspace ya encontró tres bugs distintos del
+`moveit_rviz_plugin` en esta instalación (ver Sección 6) y Tkinter no
+depende de ese plugin.
+
+Requiere el paquete de sistema `python3-tk` (no es una dependencia de
+rosdep/pip, hay que instalarla aparte una sola vez):
+
+```bash
+sudo apt install -y python3-tk
+```
+
+Con la celda completa corriendo (paso 3), en otra terminal:
+
+```bash
+ros2 run irb2600_coating_cell gui_control_node
+```
+
+- **"Go Home"**: llama a la misma lógica de `go_home_node` (plan + ejecución
+  a todas las articulaciones en 0).
+- **"Start Route"**: llama a la misma lógica de `replanning_executor_node`
+  (ejecución fila por fila con replanificación reactiva), pero con
+  `execute:=true` forzado -- a diferencia del nodo por CLI (que por defecto
+  solo planifica), el botón siempre mueve el robot de verdad.
+
+Mientras un botón está corriendo, ambos se deshabilitan (la llamada a
+MoveIt es bloqueante y corre en un hilo aparte para no congelar la
+ventana); la etiqueta de estado indica "Ready.", "Going home...", "Running
+route..." o el error si algo falla.
 
 ## 6. Qué se validó en VM y qué sigue pendiente
 

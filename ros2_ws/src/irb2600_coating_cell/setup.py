@@ -34,6 +34,7 @@ setup(
             "trajectory_planner_node = irb2600_coating_cell.trajectory_planner_node:main",
             "replanning_executor_node = irb2600_coating_cell.replanning_executor_node:main",
             "go_home_node = irb2600_coating_cell.go_home_node:main",
+            "gui_control_node = irb2600_coating_cell.gui_control_node:main",
         ],
     },
 )

@@ -27,9 +27,11 @@ class GoHomeNode(Node):
         self._client = ActionClient(self, MoveGroup, "move_action")
         self.get_logger().info("Waiting for /move_action (move_group)...")
         self._client.wait_for_server()
-        self._go_home()
 
-    def _go_home(self):
+    def go_home(self):
+        """Plan+execute a return to the "home" pose (all joints = 0). Public
+        so callers other than main() (e.g. the Tkinter GUI's background
+        thread) can reuse this node instance directly."""
         constraints = Constraints()
         for joint_name in _ARM_JOINTS:
             jc = JointConstraint()
@@ -86,6 +88,7 @@ class GoHomeNode(Node):
 def main(args=None):
     rclpy.init(args=args)
     node = GoHomeNode()
+    node.go_home()
     node.destroy_node()
     rclpy.shutdown()
 

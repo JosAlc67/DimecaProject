@@ -64,8 +64,8 @@ _ARM_JOINTS = ["joint_1", "joint_2", "joint_3", "joint_4", "joint_5", "joint_6"]
 
 class ReplanningExecutorNode(Node):
 
-    def __init__(self):
-        super().__init__("replanning_executor_node")
+    def __init__(self, **kwargs):
+        super().__init__("replanning_executor_node", **kwargs)
 
         self.declare_parameter("target_structure.frame_id", "world")
         self.declare_parameter("target_structure.position", [1.8, 0.0, 1.0])
@@ -110,11 +110,13 @@ class ReplanningExecutorNode(Node):
         self._cartesian_path_client.wait_for_service()
         self._ik_client.wait_for_service()
 
-        self._run()
-
     # -- top-level control loop ----------------------------------------------
 
-    def _run(self):
+    def run_route(self):
+        """Plan+execute the whole raster, row by row, with reactive
+        replanning. Public so callers other than main() (e.g. the Tkinter
+        GUI's background thread) can reuse this node instance without
+        re-running __init__'s service/action waits each time."""
         p = self.get_parameter
         rows, _normal_world = generate_raster_rows(
             position=p("target_structure.position").value,
@@ -421,6 +423,7 @@ class ReplanningExecutorNode(Node):
 def main(args=None):
     rclpy.init(args=args)
     node = ReplanningExecutorNode()
+    node.run_route()
     node.destroy_node()
     rclpy.shutdown()
 

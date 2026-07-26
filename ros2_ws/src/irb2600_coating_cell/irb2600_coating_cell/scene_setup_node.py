@@ -64,6 +64,14 @@ class SceneSetupNode(Node):
         self._marker_pub = self.create_publisher(
             MarkerArray, "~/scene_markers", transient_local_qos
         )
+        # TRANSIENT_LOCAL only makes a publisher's last message "sticky" for
+        # subscribers that *also* request TRANSIENT_LOCAL durability; RViz's
+        # MarkerArray display does not by default, so a one-shot publish can
+        # be missed by a RViz session that connects afterwards (observed:
+        # markers visible on one bringup, gone on the next, depending on
+        # process startup timing). Republishing periodically sidesteps that
+        # regardless of any subscriber QoS/timing details.
+        self.create_timer(2.0, self._publish_markers)
 
         self.get_logger().info(
             "Waiting for /apply_planning_scene (provided by move_group)..."
@@ -215,6 +223,9 @@ class SceneSetupNode(Node):
         future = self._apply_scene_client.call_async(request)
         future.add_done_callback(self._on_apply_scene_done)
 
+        self._publish_markers()
+
+    def _publish_markers(self):
         self._marker_pub.publish(self._build_markers())
 
     def _on_apply_scene_done(self, future):

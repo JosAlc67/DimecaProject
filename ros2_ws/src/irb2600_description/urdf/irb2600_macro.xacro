@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <robot xmlns:xacro="http://ros.org/wiki/xacro">
   <!--
-    Note: does NOT xacro:include materials.xacro here -- it must be included
+    Note: does NOT xacro:include materials.xacro here; it must be included
     exactly once by whichever top-level file assembles the robot (see
     irb2600.urdf.xacro), otherwise urdfdom rejects the duplicated
     'abb_orange' material definition. This file only uses the

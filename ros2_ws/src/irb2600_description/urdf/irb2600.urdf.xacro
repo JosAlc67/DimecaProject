@@ -16,8 +16,8 @@
     materials.xacro is included exactly once, here, before anything that
     uses xacro:material_abb_orange. xacro does not deduplicate repeated
     xacro:include of the same file, and urdfdom rejects a <material> name
-    that is defined (i.e. with a <color>/<texture> child) more than once --
-    so irb2600_macro.xacro and spray_nozzle.xacro must NOT also include it.
+    that is defined (i.e. with a color/texture child) more than once, so
+    irb2600_macro.xacro and spray_nozzle.xacro must NOT also include it.
   -->
   <xacro:include filename="$(find irb2600_description)/urdf/materials.xacro"/>
   <xacro:include filename="$(find irb2600_description)/urdf/irb2600_macro.xacro"/>

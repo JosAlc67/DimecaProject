@@ -80,6 +80,12 @@ class ReplanningExecutorNode(Node):
         self.declare_parameter("replanning_time_s", 2.0)
         self.declare_parameter("replanning_attempts", 5)
         self.declare_parameter("ik_timeout_s", 1.0)
+        # Diagnostic switch: set to false to ask /compute_ik to ignore
+        # collisions for the replanning seed IK. If IK then succeeds, the
+        # row's end pose collides with something (obstacle or self) even
+        # from the warm seed; if it still fails, it is a pure numerical
+        # convergence problem independent of collision checking.
+        self.declare_parameter("replan_ik_avoid_collisions", True)
 
         self._cartesian_path_client = self.create_client(
             GetCartesianPath, "compute_cartesian_path"
@@ -215,7 +221,9 @@ class ReplanningExecutorNode(Node):
             "target_structure.frame_id"
         ).value
         ik_request.ik_request.pose_stamped.pose = goal_pose
-        ik_request.ik_request.avoid_collisions = True
+        ik_request.ik_request.avoid_collisions = bool(
+            self.get_parameter("replan_ik_avoid_collisions").value
+        )
         if seed is not None:
             names, positions = seed
             ik_request.ik_request.robot_state.joint_state.name = names

@@ -267,6 +267,25 @@ class SceneSetupNode(Node):
 
         return marker
 
+    def _make_point_marker(self, marker_id, frame_id, position, color, scale=0.05):
+        """A small sphere marking a single reference point (e.g. the target
+        structure's center, used as the origin for the raster coating path
+        in raster_path.py) -- distinct from the box/cylinder object markers."""
+        marker = Marker()
+        marker.header.frame_id = frame_id
+        marker.header.stamp = self.get_clock().now().to_msg()
+        marker.ns = "coating_cell_points"
+        marker.id = marker_id
+        marker.type = Marker.SPHERE
+        marker.action = Marker.ADD
+        marker.pose.position.x, marker.pose.position.y, marker.pose.position.z = (
+            float(v) for v in position
+        )
+        marker.pose.orientation.w = 1.0
+        marker.scale.x = marker.scale.y = marker.scale.z = scale
+        marker.color = color
+        return marker
+
     def _build_markers(self):
         colors = self._object_colors()
         target_frame, target_position, target_orientation, target_size = self._target_pose()
@@ -274,7 +293,12 @@ class SceneSetupNode(Node):
             self._make_marker(
                 0, "target_structure", target_frame, target_position, target_orientation,
                 target_size, "box", colors["target_structure"],
-            )
+            ),
+            # Bright, unmistakable dot at the panel's reference/center point
+            # (the same point raster_path.py builds the coating sweep from).
+            self._make_point_marker(
+                999, target_frame, target_position, ColorRGBA(r=1.0, g=1.0, b=0.0, a=1.0)
+            ),
         ]
 
         for i, name in enumerate(self._obstacle_names):

@@ -68,7 +68,7 @@ class ReplanningExecutorNode(Node):
         super().__init__("replanning_executor_node")
 
         self.declare_parameter("target_structure.frame_id", "world")
-        self.declare_parameter("target_structure.position", [1.0, 0.0, 1.0])
+        self.declare_parameter("target_structure.position", [1.5, 0.0, 1.0])
         self.declare_parameter("target_structure.orientation_rpy", [0.0, 0.0, 0.0])
         self.declare_parameter("target_structure.size", [0.02, 1.0, 0.6])
         self.declare_parameter("target_structure.local_normal", [-1.0, 0.0, 0.0])

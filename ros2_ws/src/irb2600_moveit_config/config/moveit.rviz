@@ -22,7 +22,7 @@ Visualization Manager:
     - Class: rviz_default_plugins/TF
       Name: TF
       Enabled: true
-      Show Names: true
+      Show Names: false
       Show Axes: true
       Show Arrows: false
     - Class: moveit_rviz_plugin/PlanningScene
@@ -51,13 +51,17 @@ Visualization Manager:
   Value: true
   Views:
     Current:
+      # Framed to show the pedestal, the full arm reach, the target
+      # structure (centered at x=1.0) and the temporary obstacle
+      # (x=0.5, y=0.3) together by default -- see
+      # irb2600_coating_cell/config/scene_objects.yaml for those poses.
       Class: rviz_default_plugins/Orbit
-      Distance: 4.0
+      Distance: 4.5
       Focal Point:
-        X: 0
-        Y: 0
-        Z: 0.8
-      Yaw: 0.8
+        X: 0.5
+        Y: 0.0
+        Z: 0.9
+      Yaw: 0.9
       Pitch: 0.4
 Window Geometry:
   Height: 900

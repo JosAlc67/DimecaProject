@@ -15,9 +15,10 @@ Re-apply after changing a pose/size parameter at runtime with:
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Pose
-from moveit_msgs.msg import CollisionObject, PlanningScene
+from moveit_msgs.msg import CollisionObject, ObjectColor, PlanningScene
 from moveit_msgs.srv import ApplyPlanningScene
 from shape_msgs.msg import SolidPrimitive
+from std_msgs.msg import ColorRGBA
 from std_srvs.srv import Trigger
 
 from irb2600_coating_cell.geometry_utils import quaternion_from_rpy
@@ -121,6 +122,21 @@ class SceneSetupNode(Node):
         scene = PlanningScene()
         scene.is_diff = True
         scene.world.collision_objects = self._build_collision_objects()
+        # Distinct colors so both objects read clearly at a glance in RViz:
+        # blue/translucent for the target structure, warning red/orange for
+        # the temporary obstacle. Collision-object primitives have no color
+        # of their own in moveit_msgs/CollisionObject; PlanningScene.object_colors
+        # is the mechanism the PlanningScene display actually reads.
+        scene.object_colors = [
+            ObjectColor(
+                id="target_structure",
+                color=ColorRGBA(r=0.2, g=0.5, b=1.0, a=0.6),
+            ),
+            ObjectColor(
+                id="temporary_obstacle",
+                color=ColorRGBA(r=1.0, g=0.25, b=0.1, a=0.8),
+            ),
+        ]
 
         request = ApplyPlanningScene.Request()
         request.scene = scene

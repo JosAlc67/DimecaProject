@@ -5,14 +5,10 @@ submits it to MoveIt via the plain /compute_cartesian_path service -- no
 moveit_py/pymoveit2 dependency, consistent with the rest of this package.
 
 This implements report Table XVII Case 1 (no/avoidable obstacle -> full
-coverage) and exercises Case 2 (partial obstruction): avoid_collisions=True
-means MoveIt stops the Cartesian interpolation as soon as a waypoint (or the
-motion approaching it) would collide with the temporary_obstacle inserted by
-scene_setup_node, and reports how much of the path it could actually
-complete (the `fraction` field). It does NOT implement Table VI's "Replan
-the trajectory" step (recomputing an alternative route around a blocking
-obstacle) -- that reactive replanning loop is future work (Progress Report 1
-Sec. IX), out of scope for the "static obstacle" phase this node covers.
+coverage) and diagnoses Case 2 (partial obstruction).  A partial Cartesian
+path is never executed: doing so with spray enabled would silently leave part
+of the panel uncoated.  Dynamic-obstacle recovery belongs to
+replanning_executor_node.
 
 Assumes target_structure.local_normal is aligned with the target structure's
 local X axis (true for the default config/scene_objects.yaml); the raster
@@ -57,6 +53,10 @@ class TrajectoryPlannerNode(Node):
         self.declare_parameter("group_name", "manipulator")
         self.declare_parameter("tcp_link", "nozzle_tip")
         self.declare_parameter("execute", False)
+        # A partial path is useful for diagnosis, but not a successful
+        # coating plan. Keep this configurable to absorb floating-point
+        # rounding in MoveIt's reported fraction.
+        self.declare_parameter("full_coverage_threshold", 0.999)
         # Diagnostic switch: set to false to ask compute_cartesian_path to
         # ignore collisions entirely. If fraction jumps to ~1.0 with this
         # off, the low fraction was a (self-)collision; if it stays low
@@ -128,18 +128,16 @@ class TrajectoryPlannerNode(Node):
                 fraction, n_points, len(waypoints), length
             )
         )
-        if fraction < 0.999:
+        full_coverage_threshold = float(
+            self.get_parameter("full_coverage_threshold").value
+        )
+        if fraction < full_coverage_threshold:
             self.get_logger().warn(
-                "Coverage incomplete (fraction < 1.0): the requested raster "
-                "path is blocked before finishing, most likely by "
-                "temporary_obstacle. This is Table VI 'Check collisions' "
-                "surfacing an unsafe segment; automatic replanning around it "
-                "(Table VI 'Replan the trajectory') is not implemented in "
-                "this node (see module docstring)."
+                "Coverage incomplete (fraction={:.3f} < {:.3f}). The partial "
+                "trajectory is diagnostic only and will NOT be executed with "
+                "spray enabled. Use replanning_executor_node for recovery."
+                .format(fraction, full_coverage_threshold)
             )
-
-        if fraction <= 0.0:
-            self.get_logger().error("No valid Cartesian path found; nothing to execute.")
             return
 
         if self.get_parameter("execute").value:
@@ -166,17 +164,33 @@ class TrajectoryPlannerNode(Node):
 
     def _start_spray_then_execute(self, robot_trajectory):
         if not self._spray_client.wait_for_service(timeout_sec=2.0):
-            self.get_logger().warn(
-                "spray_controller_node not available; executing without "
-                "toggling spray_on."
+            self.get_logger().error(
+                "spray_controller_node is unavailable; refusing to execute "
+                "a coating trajectory without confirmed spray control."
             )
-            self._execute_trajectory(robot_trajectory)
             return
 
         request = SetBool.Request()
         request.data = True
         future = self._spray_client.call_async(request)
-        future.add_done_callback(lambda f: self._execute_trajectory(robot_trajectory))
+        future.add_done_callback(
+            lambda f: self._on_spray_enabled(f, robot_trajectory)
+        )
+
+    def _on_spray_enabled(self, future, robot_trajectory):
+        try:
+            response = future.result()
+        except Exception as exc:  # noqa: BLE001
+            self.get_logger().error(
+                f"Could not enable spray; trajectory not executed: {exc}"
+            )
+            return
+        if not response.success:
+            self.get_logger().error(
+                "Spray controller rejected enable request; trajectory not executed."
+            )
+            return
+        self._execute_trajectory(robot_trajectory)
 
     def _execute_trajectory(self, robot_trajectory):
         self.get_logger().info("Waiting for /execute_trajectory action server...")
@@ -188,7 +202,12 @@ class TrajectoryPlannerNode(Node):
         send_goal_future.add_done_callback(self._on_goal_response)
 
     def _on_goal_response(self, future):
-        goal_handle = future.result()
+        try:
+            goal_handle = future.result()
+        except Exception as exc:  # noqa: BLE001
+            self.get_logger().error(f"execute_trajectory request failed: {exc}")
+            self._stop_spray()
+            return
         if not goal_handle.accepted:
             self.get_logger().error("execute_trajectory goal was rejected.")
             self._stop_spray()
@@ -197,10 +216,18 @@ class TrajectoryPlannerNode(Node):
         result_future.add_done_callback(self._on_execute_result)
 
     def _on_execute_result(self, future):
-        result = future.result()
-        status = "SUCCEEDED" if result.status == GoalStatus.STATUS_SUCCEEDED else "FAILED"
-        self.get_logger().info(f"Trajectory execution {status}.")
-        self._stop_spray()
+        try:
+            result = future.result()
+            status = (
+                "SUCCEEDED"
+                if result.status == GoalStatus.STATUS_SUCCEEDED
+                else "FAILED"
+            )
+            self.get_logger().info(f"Trajectory execution {status}.")
+        except Exception as exc:  # noqa: BLE001
+            self.get_logger().error(f"Trajectory execution result failed: {exc}")
+        finally:
+            self._stop_spray()
 
     def _stop_spray(self):
         if not self._spray_client.service_is_ready():

@@ -1,6 +1,7 @@
-// Fase 3 - AS5600 #1 (Wire, GPIO21/22) + AS5600 #2 (Wire1, GPIO16/17)
+// Fase 3 - AS5600 #1 (Wire, GPIO21/22) + AS5600 #2 (Wire1, GPIO32/33)
 // Ambos son buses I2C hardware independientes; los dos sensores responden
 // en 0x36 pero cada uno vive en su propio bus, sin conflicto de direccion.
+// GPIO16/17 quedan libres, sin usar en este proyecto.
 // No conectar todavia AS5600 #3 ni ningun BTS7960.
 
 #include <Wire.h>
@@ -17,7 +18,7 @@ void setup() {
   delay(500);
 
   Serial.println();
-  Serial.println("=== Fase 3: AS5600 #1 (Wire 21/22) + AS5600 #2 (Wire1 16/17) ===");
+  Serial.println("=== Fase 3: AS5600 #1 (Wire 21/22) + AS5600 #2 (Wire1 32/33) ===");
 
   Wire.begin(21, 22);
   Wire.setClock(400000);
@@ -25,11 +26,11 @@ void setup() {
   Serial.println(ok1 ? "OK: AS5600 #1 responde en bus Wire (21/22)."
                       : "ERROR: AS5600 #1 no responde en bus Wire (21/22).");
 
-  Wire1.begin(16, 17);
+  Wire1.begin(32, 33);
   Wire1.setClock(400000);
   ok2 = as5600_2.begin();
-  Serial.println(ok2 ? "OK: AS5600 #2 responde en bus Wire1 (16/17)."
-                      : "ERROR: AS5600 #2 no responde en bus Wire1 (16/17).");
+  Serial.println(ok2 ? "OK: AS5600 #2 responde en bus Wire1 (32/33)."
+                      : "ERROR: AS5600 #2 no responde en bus Wire1 (32/33).");
 
   Serial.println("Prueba cruzada: gira solo el iman de #1 y confirma que #2 no cambia; luego al reves.");
 }

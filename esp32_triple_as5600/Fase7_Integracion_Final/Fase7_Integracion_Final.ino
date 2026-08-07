@@ -385,10 +385,11 @@ const uint32_t HOMING_MARGEN_PROGRESO_MS = 4000;   // debe mejorar el error en e
 
 // +1: mandar "adelante" (F) incrementa la posicion acumulada de ese motor.
 // -1: "adelante" (F) la disminuye (equivale a que "reversa" la incrementa).
-// SIN VALIDAR EN HARDWARE: si al mandar HOME el motor se aleja de 0 en vez
-// de acercarse (o se aborta por "no se acerca a 0"), invierte el signo del
-// motor correspondiente aqui.
-int8_t signoHoming[3] = {+1, +1, +1};
+// Motor 1 (indice 0): confirmado en hardware que HOME se movia al reves
+// (se alejaba de 0 en vez de acercarse) -> signo invertido a -1.
+// Motores 2 y 3 siguen SIN VALIDAR: si al mandar HOME2/HOME3 el motor se
+// aleja de 0 en vez de acercarse, invierte tambien su signo aqui.
+int8_t signoHoming[3] = {-1, +1, +1};
 
 bool homingActivo[3]         = {false, false, false};
 uint32_t homingInicio[3]     = {0, 0, 0};
@@ -397,16 +398,15 @@ float homingMejorError[3]    = {0, 0, 0};
 
 // Lee la posicion acumulada (continua, sin wraparound) en grados del
 // encoder correspondiente al motor `m` (0, 1 o 2).
-// Mapeo fisico confirmado por el usuario: AS5600 #1 esta en el eje del
-// Motor 3, y AS5600 #3 esta en el eje del Motor 1 (cruzados). AS5600 #2
-// si corresponde al Motor 2.
+// Mapeo fisico confirmado por el usuario: cada AS5600 esta emparejado con
+// su motor del mismo numero (1-1, 2-2, 3-3), sin cruces.
 bool leerAnguloAcumuladoGrados(uint8_t m, float &grados) {
   int32_t posRaw;
   bool ok;
   switch (m) {
-    case 0: ok = comOk3; posRaw = posicionAcum3; break;                    // Motor 1 -> AS5600 #3
+    case 0: ok = comOk1; posRaw = as5600_1.getCumulativePosition(false); break; // Motor 1 -> AS5600 #1
     case 1: ok = comOk2; posRaw = as5600_2.getCumulativePosition(false); break; // Motor 2 -> AS5600 #2
-    case 2: ok = comOk1; posRaw = as5600_1.getCumulativePosition(false); break; // Motor 3 -> AS5600 #1
+    case 2: ok = comOk3; posRaw = posicionAcum3; break;                        // Motor 3 -> AS5600 #3
     default: return false;
   }
   if (!ok) return false;

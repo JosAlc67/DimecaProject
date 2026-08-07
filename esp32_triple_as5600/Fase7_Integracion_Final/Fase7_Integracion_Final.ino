@@ -220,6 +220,22 @@ void resetPosicionAcumulada3(int32_t nuevaPosicion) {
   posicionAcum3 = nuevaPosicion;
 }
 
+// Actualizacion RAPIDA del conteo de vueltas de los 3 encoders. Se llama en
+// cada iteracion de loop() (no solo cuando toca imprimir), porque si el eje
+// gira mas de media vuelta entre dos actualizaciones el algoritmo pierde la
+// cuenta. TAMBIEN se llama explicitamente despues de cualquier delay()
+// bloqueante (por ejemplo en medirVelocidadGrados()), porque mientras
+// loop() esta bloqueado esta actualizacion no ocurre sola.
+void actualizarEncoders() {
+  as5600_1.getCumulativePosition(true);
+  comOk1 = (as5600_1.lastError() == 0);
+
+  as5600_2.getCumulativePosition(true);
+  comOk2 = (as5600_2.lastError() == 0);
+
+  comOk3 = actualizarPosicion3();
+}
+
 void imprimirPosicion(const char *nombre, bool ok, int32_t posicionRaw, int32_t vueltas, bool imanOk) {
   if (!ok) {
     Serial.print(nombre);
@@ -302,11 +318,35 @@ void calibrarSensor(uint8_t indice) {
 const uint32_t PWM_FREQ_HZ    = 20000;
 const uint8_t  PWM_RES_BITS   = 8;
 // 60 (~23%) resulto insuficiente para vencer la friccion estatica de los
-// motores (no arrancaban). 255 (100%) si arranco, confirmado en pruebas,
-// pero no se quiere dejar al maximo como velocidad "baja" por defecto.
-// 150 (~59%) es un valor intermedio SIN VALIDAR EN HARDWARE todavia:
-// confirma que los 3 motores arrancan con este valor, o ajustalo.
-const uint8_t  VELOCIDAD_BAJA = 150;
+// motores (no arrancaban). 255 (100%) si arranco, confirmado en pruebas.
+// Duty minimo aceptado al calibrar velocidades (ver CALVEL mas abajo),
+// para no terminar bajando tanto el duty de un motor rapido que deje de
+// arrancar.
+const uint8_t DUTY_MIN_SEGURO = 90;
+
+// Duty por motor (ya no es un solo valor global): cada motor puede
+// necesitar un duty distinto para girar a una velocidad real similar a
+// los otros dos, dado que a igual duty no giran igual de rapido. Se
+// inicializa en 150 (el valor validado antes de tener CALVEL) y se
+// persiste en flash una vez calibrado.
+uint8_t velocidadMotor[3] = {150, 150, 150};
+
+int16_t cargarVelocidadMotor(uint8_t indice) {
+  char clave[8];
+  snprintf(clave, sizeof(clave), "vel%u", indice);
+  prefs.begin(NVS_NAMESPACE, true);
+  int16_t valor = prefs.getShort(clave, 150); // 150 = valor por defecto si nunca se calibro
+  prefs.end();
+  return valor;
+}
+
+void guardarVelocidadMotor(uint8_t indice, int16_t valor) {
+  char clave[8];
+  snprintf(clave, sizeof(clave), "vel%u", indice);
+  prefs.begin(NVS_NAMESPACE, false);
+  prefs.putShort(clave, valor);
+  prefs.end();
+}
 
 const uint8_t PIN_RPWM[3] = {25, 27, 19};
 const uint8_t PIN_LPWM[3] = {26, 18, 23};
@@ -385,7 +425,7 @@ void girarAdelante(uint8_t m) {
     return;
   }
   escribirPWM(PIN_LPWM[m], canalLPWM(m), 0);
-  escribirPWM(PIN_RPWM[m], canalRPWM(m), VELOCIDAD_BAJA);
+  escribirPWM(PIN_RPWM[m], canalRPWM(m), velocidadMotor[m]);
   estadoMotor[m] = ADELANTE;
   Serial.print("Motor ");
   Serial.print(m + 1);
@@ -398,11 +438,107 @@ void girarReversa(uint8_t m) {
     return;
   }
   escribirPWM(PIN_RPWM[m], canalRPWM(m), 0);
-  escribirPWM(PIN_LPWM[m], canalLPWM(m), VELOCIDAD_BAJA);
+  escribirPWM(PIN_LPWM[m], canalLPWM(m), velocidadMotor[m]);
   estadoMotor[m] = REVERSA;
   Serial.print("Motor ");
   Serial.print(m + 1);
   Serial.println(": GIRANDO REVERSA (baja velocidad)");
+}
+
+// ---------------- CALVEL: calibracion de velocidad entre motores ----------------
+//
+// A igual duty, los 3 motores no giran necesariamente a la misma velocidad
+// real (friccion, tolerancias de fabricacion, etc). CALVEL mide con el
+// propio encoder cuantos grados/segundo gira cada motor a su duty actual,
+// y ajusta el duty de cada uno (de forma proporcional, asumiendo relacion
+// aproximadamente lineal duty<->velocidad en este rango) para que los 3
+// terminen girando a una velocidad similar a la del motor mas lento -no
+// se puede acelerar un motor mas alla de lo que ya da a duty 255, asi que
+// siempre se iguala hacia abajo, nunca hacia arriba.
+//
+// Esto es calibracion de lazo abierto (se mide una vez, se fija un duty
+// nuevo y listo) - no es control de velocidad en tiempo real ni PID.
+
+const uint32_t CALVEL_DURACION_MS = 1500; // cuanto tiempo gira cada motor para medir
+
+// Gira el motor `m` hacia adelante durante `duracionMs` y devuelve la
+// velocidad medida en grados/segundo (valor absoluto). Requiere que el
+// motor este detenido antes de llamar.
+float medirVelocidadGrados(uint8_t m, uint32_t duracionMs) {
+  actualizarEncoders(); // asegura que "antes" sea una lectura fresca
+  int32_t antes = leerPosicionAcumRaw(m);
+  girarAdelante(m);
+  delay(duracionMs); // bloqueante a proposito: es una medicion corta y unica, no una operacion continua
+  actualizarEncoders(); // el delay() bloqueo loop(), hay que refrescar a mano antes de leer "despues"
+  detenerMotor(m);
+  int32_t despues = leerPosicionAcumRaw(m);
+
+  float gradosRecorridos = fabs((float)(despues - antes)) * (360.0f / 4096.0f);
+  return gradosRecorridos / (duracionMs / 1000.0f);
+}
+
+void calibrarVelocidades() {
+  for (uint8_t i = 0; i < 3; i++) {
+    if (estadoMotor[i] != PARADO) {
+      Serial.println("RECHAZADO: los 3 motores deben estar detenidos (S/SS) antes de CALVEL.");
+      return;
+    }
+  }
+
+  Serial.println("Calibrando velocidades... (gira cada motor por turnos, unos segundos)");
+
+  float velocidad[3];
+  for (uint8_t i = 0; i < 3; i++) {
+    velocidad[i] = medirVelocidadGrados(i, CALVEL_DURACION_MS);
+    Serial.print("Motor ");
+    Serial.print(i + 1);
+    Serial.print(": duty=");
+    Serial.print(velocidadMotor[i]);
+    Serial.print(" -> ");
+    Serial.print(velocidad[i], 2);
+    Serial.println(" deg/s medidos");
+  }
+
+  float velocidadObjetivo = velocidad[0];
+  for (uint8_t i = 1; i < 3; i++) {
+    if (velocidad[i] < velocidadObjetivo) velocidadObjetivo = velocidad[i];
+  }
+
+  Serial.print("Velocidad objetivo (la del motor mas lento): ");
+  Serial.print(velocidadObjetivo, 2);
+  Serial.println(" deg/s");
+
+  for (uint8_t i = 0; i < 3; i++) {
+    if (velocidad[i] <= 0.01f) {
+      Serial.print("Motor ");
+      Serial.print(i + 1);
+      Serial.println(": ADVERTENCIA - velocidad medida ~0, no se ajusta (revisa el motor).");
+      continue;
+    }
+    float factor = velocidadObjetivo / velocidad[i];
+    int16_t nuevaDuty = (int16_t)round(velocidadMotor[i] * factor);
+    if (nuevaDuty < DUTY_MIN_SEGURO) {
+      Serial.print("Motor ");
+      Serial.print(i + 1);
+      Serial.print(": el duty calculado (");
+      Serial.print(nuevaDuty);
+      Serial.print(") es menor al minimo seguro (");
+      Serial.print(DUTY_MIN_SEGURO);
+      Serial.println("), se deja en el minimo - este motor seguira algo mas rapido que los otros.");
+      nuevaDuty = DUTY_MIN_SEGURO;
+    }
+    if (nuevaDuty > 255) nuevaDuty = 255;
+
+    velocidadMotor[i] = (uint8_t)nuevaDuty;
+    guardarVelocidadMotor(i + 1, nuevaDuty);
+    Serial.print("Motor ");
+    Serial.print(i + 1);
+    Serial.print(": duty ajustado a ");
+    Serial.print(nuevaDuty);
+    Serial.println(" (guardado en flash).");
+  }
+
+  Serial.println("Calibracion de velocidad terminada. Puedes correr CALVEL de nuevo para refinar.");
 }
 
 // ---------------- HOME (regreso a 0) - lazo cerrado simple, SIN PID ----------------
@@ -570,8 +706,9 @@ void procesarComando(String cmd) {
     for (uint8_t i = 0; i < 3; i++) iniciarHoming(i);
   }
   else if (cmd == "STATUS") imprimirEstadoCompleto();
+  else if (cmd == "CALVEL") calibrarVelocidades();
   else if (cmd.length() > 0) {
-    Serial.println("Comando no reconocido. Usa: M1 M2 M3 F R S SS CAL1 CAL2 CAL3 HOME1 HOME2 HOME3 HOME STATUS");
+    Serial.println("Comando no reconocido. Usa: M1 M2 M3 F R S SS CAL1 CAL2 CAL3 HOME1 HOME2 HOME3 HOME STATUS CALVEL");
   }
 }
 
@@ -633,6 +770,18 @@ void setup() {
   Serial.print(" | #3: ");
   Serial.println(pos3);
 
+  // Restaura el duty por motor calibrado con CALVEL (150 por defecto si
+  // nunca se calibro).
+  velocidadMotor[0] = (uint8_t)cargarVelocidadMotor(1);
+  velocidadMotor[1] = (uint8_t)cargarVelocidadMotor(2);
+  velocidadMotor[2] = (uint8_t)cargarVelocidadMotor(3);
+  Serial.print("Duty por motor cargado de flash -> #1: ");
+  Serial.print(velocidadMotor[0]);
+  Serial.print(" | #2: ");
+  Serial.print(velocidadMotor[1]);
+  Serial.print(" | #3: ");
+  Serial.println(velocidadMotor[2]);
+
   for (uint8_t i = 0; i < 3; i++) {
 #if CORE_LEDC_V3
     configurarPWM(PIN_RPWM[i], 0);
@@ -649,6 +798,7 @@ void setup() {
   Serial.println("Calibracion: CAL1 CAL2 CAL3 -> fija 0 deg en la posicion fisica actual de ese eje (persiste en flash)");
   Serial.println("HOME: HOME1 HOME2 HOME3 (un motor) | HOME (los 3 a la vez) -> regreso a 0 en lazo cerrado, sin PID");
   Serial.println("STATUS -> imprime el angulo/vueltas de los 3 encoders (ya no se imprime solo, para no saturar el Monitor Serial)");
+  Serial.println("CALVEL -> mide y empareja la velocidad real de los 3 motores (requiere los 3 detenidos, persiste en flash)");
   Serial.println("Motor activo por defecto: 1.");
   Serial.println();
 
@@ -661,16 +811,7 @@ void loop() {
     procesarComando(linea);
   }
 
-  // Actualizacion RAPIDA del conteo de vueltas: se hace en cada iteracion
-  // de loop(), no solo cuando toca imprimir, porque si el eje gira mas de
-  // media vuelta entre dos actualizaciones el algoritmo pierde la cuenta.
-  as5600_1.getCumulativePosition(true);
-  comOk1 = (as5600_1.lastError() == 0);
-
-  as5600_2.getCumulativePosition(true);
-  comOk2 = (as5600_2.lastError() == 0);
-
-  comOk3 = actualizarPosicion3();
+  actualizarEncoders();
 
   // Avanza el homing (si esta activo) de cada motor, tambien en cada
   // iteracion de loop() para reaccionar rapido si hay que abortar.

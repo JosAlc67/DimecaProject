@@ -41,13 +41,13 @@
 // adelante: al no reiniciarse nunca en 0, no sufre el problema de "salto
 // enorme de error" que sí tiene el angulo 0-359.99 cerca de la frontera.
 //
-// IMPORTANTE - limitacion: el conteo de vueltas vive solo en RAM. Si el
-// ESP32 se apaga/reinicia, las vueltas se pierden y se vuelve a contar
-// desde 0 en el punto donde haya quedado la calibracion guardada en flash
-// (el offset de grados SI sobrevive, el conteo de vueltas NO). Si en algun
-// momento necesitas que el conteo de vueltas tambien sobreviva un apagado,
-// avisame - se puede hacer pero implica guardar en flash periodicamente
-// (no en cada lectura, por desgaste de la memoria flash).
+// PERSISTENCIA: la posicion acumulada de cada motor se guarda en flash
+// (NVS) cada vez que ese motor se detiene (detenerMotor()), y ademas cada
+// CHECKPOINT_INTERVALO_MS por seguridad si el ESP32 se apagara mientras un
+// motor sigue en movimiento. Al arrancar se restaura, asi "0" sigue
+// significando el mismo punto fisico entre reinicios/apagados. Esto NO
+// funciona si el eje se mueve a mano sin alimentacion: el AS5600 es un
+// sensor relativo para el conteo de vueltas, no detecta nada sin corriente.
 //
 // IMPORTANTE - requisito de velocidad de actualizacion: el algoritmo de
 // conteo de vueltas se rompe si el eje gira mas de media vuelta (180 grados)
@@ -106,6 +106,26 @@ void guardarOffsetRaw(uint8_t indice, int16_t offsetRaw) {
   snprintf(clave, sizeof(clave), "off%u", indice);
   prefs.begin(NVS_NAMESPACE, false); // lectura/escritura
   prefs.putShort(clave, offsetRaw);
+  prefs.end();
+}
+
+// Posicion acumulada (multi-turn) de cada encoder, persistida para que "0"
+// siga significando el mismo punto fisico entre reinicios/apagados. Solo
+// es valido si el eje no se movio a mano mientras el ESP32 estaba apagado.
+int32_t cargarPosicionAcum(uint8_t indice) {
+  char clave[8];
+  snprintf(clave, sizeof(clave), "pos%u", indice);
+  prefs.begin(NVS_NAMESPACE, true);
+  int32_t valor = prefs.getInt(clave, 0);
+  prefs.end();
+  return valor;
+}
+
+void guardarPosicionAcum(uint8_t indice, int32_t valor) {
+  char clave[8];
+  snprintf(clave, sizeof(clave), "pos%u", indice);
+  prefs.begin(NVS_NAMESPACE, false);
+  prefs.putInt(clave, valor);
   prefs.end();
 }
 
@@ -332,10 +352,28 @@ uint8_t canalLPWM(uint8_t m) {
 #endif
 }
 
+// Posicion acumulada RAW (sin convertir a grados) del encoder emparejado
+// con el motor `m` (mapeo confirmado 1-1, 2-2, 3-3).
+int32_t leerPosicionAcumRaw(uint8_t m) {
+  switch (m) {
+    case 0: return as5600_1.getCumulativePosition(false);
+    case 1: return as5600_2.getCumulativePosition(false);
+    case 2: return posicionAcum3;
+    default: return 0;
+  }
+}
+
+// Guarda en flash la posicion acumulada actual del encoder del motor `m`,
+// para poder restaurarla en el proximo arranque (ver setup()).
+void guardarPosicionMotor(uint8_t m) {
+  guardarPosicionAcum(m + 1, leerPosicionAcumRaw(m));
+}
+
 void detenerMotor(uint8_t m) {
   escribirPWM(PIN_RPWM[m], canalRPWM(m), 0);
   escribirPWM(PIN_LPWM[m], canalLPWM(m), 0);
   estadoMotor[m] = PARADO;
+  guardarPosicionMotor(m);
   Serial.print("Motor ");
   Serial.print(m + 1);
   Serial.println(": DETENIDO");
@@ -539,6 +577,9 @@ void procesarComando(String cmd) {
 
 // ---------------- Programa principal ----------------
 
+const uint32_t CHECKPOINT_INTERVALO_MS = 60000; // respaldo de posicion cada 60s
+uint32_t ultimoCheckpoint = 0;
+
 void setup() {
   Serial.begin(115200);
   delay(500);
@@ -571,15 +612,26 @@ void setup() {
   Serial.print(" | #3: ");
   Serial.println(offsetRaw3);
 
-  // IMPORTANTE: inicializa la referencia interna de seguimiento de vueltas
-  // con la posicion FISICA real actual (no con 0 a secas). Sin este paso,
-  // la primera llamada a getCumulativePosition()/actualizarPosicion3()
-  // podria interpretar la diferencia entre "0 por defecto" y la posicion
-  // real como si fuera una vuelta completa que nunca ocurrio.
-  as5600_1.resetCumulativePosition(0);
-  as5600_2.resetCumulativePosition(0);
-  resetPosicionAcumulada3(0);
-  Serial.println("Conteo de vueltas iniciado en 0 para los 3 sensores (vive solo en RAM, no sobrevive un reinicio).");
+  // Restaura la posicion acumulada guardada en flash (si existe) en vez de
+  // reiniciar siempre en 0, para que "0" siga siendo el mismo punto fisico
+  // entre reinicios/apagados. Esto asume que el eje no se movio a mano
+  // mientras el ESP32 estaba apagado (el AS5600 es un sensor relativo para
+  // el conteo de vueltas, no puede detectar movimiento sin alimentacion).
+  // resetCumulativePosition()/resetPosicionAcumulada3() tambien resincronizan
+  // la referencia interna con la posicion FISICA real actual, evitando que
+  // la primera lectura interprete un salto falso.
+  int32_t pos1 = cargarPosicionAcum(1);
+  int32_t pos2 = cargarPosicionAcum(2);
+  int32_t pos3 = cargarPosicionAcum(3);
+  as5600_1.resetCumulativePosition(pos1);
+  as5600_2.resetCumulativePosition(pos2);
+  resetPosicionAcumulada3(pos3);
+  Serial.print("Posicion restaurada de flash (cuentas RAW) -> #1: ");
+  Serial.print(pos1);
+  Serial.print(" | #2: ");
+  Serial.print(pos2);
+  Serial.print(" | #3: ");
+  Serial.println(pos3);
 
   for (uint8_t i = 0; i < 3; i++) {
 #if CORE_LEDC_V3
@@ -599,6 +651,8 @@ void setup() {
   Serial.println("STATUS -> imprime el angulo/vueltas de los 3 encoders (ya no se imprime solo, para no saturar el Monitor Serial)");
   Serial.println("Motor activo por defecto: 1.");
   Serial.println();
+
+  ultimoCheckpoint = millis();
 }
 
 void loop() {
@@ -623,4 +677,13 @@ void loop() {
   actualizarHoming(0);
   actualizarHoming(1);
   actualizarHoming(2);
+
+  // Respaldo periodico en flash, por si el ESP32 pierde alimentacion
+  // mientras un motor sigue en movimiento (detenerMotor() ya guarda al
+  // detenerse, esto es solo la red de seguridad para ese caso puntual).
+  uint32_t ahora = millis();
+  if (ahora - ultimoCheckpoint >= CHECKPOINT_INTERVALO_MS) {
+    ultimoCheckpoint = ahora;
+    for (uint8_t i = 0; i < 3; i++) guardarPosicionMotor(i);
+  }
 }

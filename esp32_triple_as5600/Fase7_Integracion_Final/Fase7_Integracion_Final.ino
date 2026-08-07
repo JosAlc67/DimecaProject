@@ -77,6 +77,11 @@ AS5600 as5600_1(&Wire);
 AS5600 as5600_2(&Wire1);
 SoftWire i2c3;
 
+// Estado de comunicacion de cada sensor, actualizado en cada iteracion de
+// loop() (ver mas abajo). Se declara aqui arriba porque tanto el homing
+// como el reporte por Serial lo necesitan.
+bool comOk1 = false, comOk2 = false, comOk3 = false;
+
 // ---------------- Calibracion (offset de cero) persistente en NVS ----------------
 
 Preferences prefs;
@@ -362,6 +367,132 @@ void girarReversa(uint8_t m) {
   Serial.println(": GIRANDO REVERSA (baja velocidad)");
 }
 
+// ---------------- HOME (regreso a 0) - lazo cerrado simple, SIN PID ----------------
+//
+// "Si no estas en 0, muevete hacia 0 a VELOCIDAD_BAJA; detente al llegar."
+// No hay ganancias ni ajuste fino de velocidad - es control bang-bang, el
+// mas simple que existe. Asume que AS5600 #N esta en el mismo eje que
+// Motor N (#1<->#1, #2<->#2, #3<->#3) - SIN VERIFICAR, confirmalo.
+//
+// Incluye dos protecciones para no empujar indefinidamente en una
+// direccion incorrecta:
+//  - Si no mejora el error en HOMING_MARGEN_PROGRESO_MS, aborta.
+//  - Si se excede HOMING_TIMEOUT_MS en total, aborta.
+
+const float    TOLERANCIA_HOMING_DEG     = 3.0f;   // se considera "en home" dentro de esto
+const uint32_t HOMING_TIMEOUT_MS         = 20000;  // aborta si tarda mas de esto en total
+const uint32_t HOMING_MARGEN_PROGRESO_MS = 4000;   // debe mejorar el error en este tiempo
+
+// +1: mandar "adelante" (F) incrementa la posicion acumulada de ese motor.
+// -1: "adelante" (F) la disminuye (equivale a que "reversa" la incrementa).
+// SIN VALIDAR EN HARDWARE: si al mandar HOME el motor se aleja de 0 en vez
+// de acercarse (o se aborta por "no se acerca a 0"), invierte el signo del
+// motor correspondiente aqui.
+int8_t signoHoming[3] = {+1, +1, +1};
+
+bool homingActivo[3]         = {false, false, false};
+uint32_t homingInicio[3]     = {0, 0, 0};
+uint32_t homingUltimoProgreso[3] = {0, 0, 0};
+float homingMejorError[3]    = {0, 0, 0};
+
+// Lee la posicion acumulada (continua, sin wraparound) en grados del
+// encoder correspondiente al motor `m` (0, 1 o 2).
+bool leerAnguloAcumuladoGrados(uint8_t m, float &grados) {
+  int32_t posRaw;
+  bool ok;
+  switch (m) {
+    case 0: ok = comOk1; posRaw = as5600_1.getCumulativePosition(false); break;
+    case 1: ok = comOk2; posRaw = as5600_2.getCumulativePosition(false); break;
+    case 2: ok = comOk3; posRaw = posicionAcum3; break;
+    default: return false;
+  }
+  if (!ok) return false;
+  grados = posRaw * (360.0f / 4096.0f);
+  return true;
+}
+
+void detenerHoming(uint8_t m, const char *motivo) {
+  homingActivo[m] = false;
+  detenerMotor(m);
+  Serial.print("Motor ");
+  Serial.print(m + 1);
+  Serial.print(": HOME ");
+  Serial.println(motivo);
+}
+
+void iniciarHoming(uint8_t m) {
+  if (estadoMotor[m] != PARADO) {
+    Serial.print("Motor ");
+    Serial.print(m + 1);
+    Serial.println(": RECHAZADO - detenlo (S) antes de iniciar HOME.");
+    return;
+  }
+  float grados;
+  bool ok = leerAnguloAcumuladoGrados(m, grados);
+  if (!ok) {
+    Serial.print("Motor ");
+    Serial.print(m + 1);
+    Serial.println(": RECHAZADO - encoder sin comunicacion, no se puede iniciar HOME.");
+    return;
+  }
+  homingActivo[m] = true;
+  homingInicio[m] = millis();
+  homingUltimoProgreso[m] = millis();
+  homingMejorError[m] = fabs(grados);
+  Serial.print("Motor ");
+  Serial.print(m + 1);
+  Serial.print(": iniciando HOME desde ");
+  Serial.print(grados, 2);
+  Serial.println(" deg...");
+}
+
+// Se llama en CADA iteracion de loop() para los motores con homing activo.
+void actualizarHoming(uint8_t m) {
+  if (!homingActivo[m]) return;
+
+  float grados;
+  if (!leerAnguloAcumuladoGrados(m, grados)) {
+    detenerHoming(m, "ABORTADO - se perdio comunicacion con el encoder.");
+    return;
+  }
+
+  float errorAbs = fabs(grados);
+
+  if (errorAbs <= TOLERANCIA_HOMING_DEG) {
+    homingActivo[m] = false;
+    detenerMotor(m);
+    Serial.print("Motor ");
+    Serial.print(m + 1);
+    Serial.print(": HOME alcanzado, posicion final = ");
+    Serial.print(grados, 2);
+    Serial.println(" deg.");
+    return;
+  }
+
+  if (millis() - homingInicio[m] > HOMING_TIMEOUT_MS) {
+    detenerHoming(m, "ABORTADO - tiempo limite excedido.");
+    return;
+  }
+
+  if (errorAbs < homingMejorError[m] - 0.5f) {
+    homingMejorError[m] = errorAbs;
+    homingUltimoProgreso[m] = millis();
+  } else if (millis() - homingUltimoProgreso[m] > HOMING_MARGEN_PROGRESO_MS) {
+    detenerHoming(m, "ABORTADO - no se acerca a 0. Revisa signoHoming[] o el acople mecanico.");
+    return;
+  }
+
+  bool necesitaDisminuir = (grados > 0);
+  bool debeIrAdelante = (signoHoming[m] > 0) ? !necesitaDisminuir : necesitaDisminuir;
+  EstadoMotor direccionDeseada = debeIrAdelante ? ADELANTE : REVERSA;
+
+  if (estadoMotor[m] != direccionDeseada) {
+    if (estadoMotor[m] != PARADO) detenerMotor(m);
+    if (debeIrAdelante) girarAdelante(m);
+    else girarReversa(m);
+  }
+}
+
 void procesarComando(String cmd) {
   cmd.trim();
   cmd.toUpperCase();
@@ -371,16 +502,22 @@ void procesarComando(String cmd) {
   else if (cmd == "M3") { motorActivo = 2; Serial.println("Motor activo: 3"); }
   else if (cmd == "F") girarAdelante(motorActivo);
   else if (cmd == "R") girarReversa(motorActivo);
-  else if (cmd == "S") detenerMotor(motorActivo);
+  else if (cmd == "S") { homingActivo[motorActivo] = false; detenerMotor(motorActivo); }
   else if (cmd == "SS") {
-    for (uint8_t i = 0; i < 3; i++) detenerMotor(i);
+    for (uint8_t i = 0; i < 3; i++) { homingActivo[i] = false; detenerMotor(i); }
     Serial.println("PARADA DE EMERGENCIA: los 3 motores detenidos.");
   }
   else if (cmd == "CAL1") calibrarSensor(1);
   else if (cmd == "CAL2") calibrarSensor(2);
   else if (cmd == "CAL3") calibrarSensor(3);
+  else if (cmd == "HOME1") iniciarHoming(0);
+  else if (cmd == "HOME2") iniciarHoming(1);
+  else if (cmd == "HOME3") iniciarHoming(2);
+  else if (cmd == "HOME") {
+    for (uint8_t i = 0; i < 3; i++) iniciarHoming(i);
+  }
   else if (cmd.length() > 0) {
-    Serial.println("Comando no reconocido. Usa: M1 M2 M3 F R S SS");
+    Serial.println("Comando no reconocido. Usa: M1 M2 M3 F R S SS CAL1 CAL2 CAL3 HOME1 HOME2 HOME3 HOME");
   }
 }
 
@@ -445,13 +582,12 @@ void setup() {
   Serial.println();
   Serial.println("Comandos: M1 M2 M3 (seleccionar motor) | F (adelante) | R (reversa) | S (detener) | SS (parada de emergencia)");
   Serial.println("Calibracion: CAL1 CAL2 CAL3 -> fija 0 deg en la posicion fisica actual de ese eje (persiste en flash)");
+  Serial.println("HOME: HOME1 HOME2 HOME3 (un motor) | HOME (los 3 a la vez) -> regreso a 0 en lazo cerrado, sin PID");
   Serial.println("Motor activo por defecto: 1. Angulos se imprimen cada 500 ms.");
   Serial.println();
 
   ultimaLectura = millis();
 }
-
-bool comOk1 = false, comOk2 = false, comOk3 = false;
 
 void loop() {
   if (Serial.available()) {
@@ -469,6 +605,12 @@ void loop() {
   comOk2 = (as5600_2.lastError() == 0);
 
   comOk3 = actualizarPosicion3();
+
+  // Avanza el homing (si esta activo) de cada motor, tambien en cada
+  // iteracion de loop() para reaccionar rapido si hay que abortar.
+  actualizarHoming(0);
+  actualizarHoming(1);
+  actualizarHoming(2);
 
   uint32_t ahora = millis();
   if (ahora - ultimaLectura >= INTERVALO_LECTURA_MS) {

@@ -558,6 +558,85 @@ void calibrarVelocidades() {
   Serial.println("Calibracion de velocidad terminada. Puedes correr CALVEL de nuevo para refinar.");
 }
 
+// Variante manual: "CALVEL M<1-3> <duty>". En vez de tomar como objetivo
+// la velocidad del motor mas lento, mide el motor `motorRef` EXACTAMENTE
+// al duty `dutyRef` que se le indique, usa esa velocidad medida como
+// objetivo fijo, y ajusta los otros dos motores para acercarse a ella.
+// El motor de referencia queda fijado en `dutyRef` (no se recalcula).
+void calibrarVelocidadesConReferencia(uint8_t motorRef, uint8_t dutyRef) {
+  for (uint8_t i = 0; i < 3; i++) {
+    if (estadoMotor[i] != PARADO) {
+      Serial.println("RECHAZADO: los 3 motores deben estar detenidos (S/SS) antes de CALVEL.");
+      return;
+    }
+  }
+
+  Serial.print("Calibrando con referencia: Motor ");
+  Serial.print(motorRef + 1);
+  Serial.print(" fijado a duty ");
+  Serial.println(dutyRef);
+
+  velocidadMotor[motorRef] = dutyRef;
+  float velocidadObjetivo = medirVelocidadGrados(motorRef, CALVEL_DURACION_MS);
+  guardarVelocidadMotor(motorRef + 1, dutyRef);
+  Serial.print("Motor ");
+  Serial.print(motorRef + 1);
+  Serial.print(" (referencia): duty=");
+  Serial.print(dutyRef);
+  Serial.print(" -> ");
+  Serial.print(velocidadObjetivo, 2);
+  Serial.println(" deg/s medidos. Esa es la velocidad objetivo para los otros dos.");
+
+  for (uint8_t i = 0; i < 3; i++) {
+    if (i == motorRef) continue; // ya quedo fijo, no se recalcula
+
+    float velocidadMedida = medirVelocidadGrados(i, CALVEL_DURACION_MS);
+    Serial.print("Motor ");
+    Serial.print(i + 1);
+    Serial.print(": duty=");
+    Serial.print(velocidadMotor[i]);
+    Serial.print(" -> ");
+    Serial.print(velocidadMedida, 2);
+    Serial.println(" deg/s medidos");
+
+    if (velocidadMedida <= 0.01f) {
+      Serial.print("Motor ");
+      Serial.print(i + 1);
+      Serial.println(": ADVERTENCIA - velocidad medida ~0, no se ajusta (revisa el motor).");
+      continue;
+    }
+
+    float factor = velocidadObjetivo / velocidadMedida;
+    int32_t nuevaDuty = (int32_t)round((float)velocidadMotor[i] * factor);
+
+    if (nuevaDuty > 255) {
+      Serial.print("Motor ");
+      Serial.print(i + 1);
+      Serial.println(": ADVERTENCIA - ni siquiera a duty 255 alcanza la velocidad de referencia. Se deja en 255 (quedara mas lento que el objetivo).");
+      nuevaDuty = 255;
+    } else if (nuevaDuty < DUTY_MIN_SEGURO) {
+      Serial.print("Motor ");
+      Serial.print(i + 1);
+      Serial.print(": el duty calculado (");
+      Serial.print(nuevaDuty);
+      Serial.print(") es menor al minimo seguro (");
+      Serial.print(DUTY_MIN_SEGURO);
+      Serial.println("), se deja en el minimo - este motor seguira algo mas rapido que el objetivo.");
+      nuevaDuty = DUTY_MIN_SEGURO;
+    }
+
+    velocidadMotor[i] = (uint8_t)nuevaDuty;
+    guardarVelocidadMotor(i + 1, (int16_t)nuevaDuty);
+    Serial.print("Motor ");
+    Serial.print(i + 1);
+    Serial.print(": duty ajustado a ");
+    Serial.print(nuevaDuty);
+    Serial.println(" (guardado en flash).");
+  }
+
+  Serial.println("Calibracion con referencia terminada.");
+}
+
 // ---------------- HOME (regreso a 0) - lazo cerrado simple, SIN PID ----------------
 //
 // Regla fija para los 3 motores, confirmada en hardware: F (adelante)
@@ -724,8 +803,32 @@ void procesarComando(String cmd) {
   }
   else if (cmd == "STATUS") imprimirEstadoCompleto();
   else if (cmd == "CALVEL") calibrarVelocidades();
+  else if (cmd.startsWith("CALVEL ")) {
+    // Formato: CALVEL M<1-3> <duty 0-255>. Ejemplo: CALVEL M3 225
+    String resto = cmd.substring(7);
+    resto.trim();
+    int espacio = resto.indexOf(' ');
+    bool formatoValido = false;
+    if (espacio > 0) {
+      String parteMotor = resto.substring(0, espacio);
+      String parteDuty = resto.substring(espacio + 1);
+      parteMotor.trim();
+      parteDuty.trim();
+      if (parteMotor.length() == 2 && parteMotor.charAt(0) == 'M') {
+        int numMotor = parteMotor.substring(1).toInt();
+        int duty = parteDuty.toInt();
+        if (numMotor >= 1 && numMotor <= 3 && duty >= 0 && duty <= 255) {
+          formatoValido = true;
+          calibrarVelocidadesConReferencia((uint8_t)(numMotor - 1), (uint8_t)duty);
+        }
+      }
+    }
+    if (!formatoValido) {
+      Serial.println("Formato invalido. Usa: CALVEL M<1-3> <duty 0-255>. Ejemplo: CALVEL M3 225");
+    }
+  }
   else if (cmd.length() > 0) {
-    Serial.println("Comando no reconocido. Usa: M1 M2 M3 F R S SS CAL1 CAL2 CAL3 HOME1 HOME2 HOME3 HOME STATUS CALVEL");
+    Serial.println("Comando no reconocido. Usa: M1 M2 M3 F R S SS CAL1 CAL2 CAL3 HOME1 HOME2 HOME3 HOME STATUS CALVEL CALVEL M<1-3> <duty>");
   }
 }
 
@@ -815,7 +918,8 @@ void setup() {
   Serial.println("Calibracion: CAL1 CAL2 CAL3 -> fija 0 deg en la posicion fisica actual de ese eje (persiste en flash)");
   Serial.println("HOME: HOME1 HOME2 HOME3 (un motor) | HOME (los 3 a la vez) -> regreso a 0 en lazo cerrado, sin PID");
   Serial.println("STATUS -> imprime el angulo/vueltas de los 3 encoders (ya no se imprime solo, para no saturar el Monitor Serial)");
-  Serial.println("CALVEL -> mide y empareja la velocidad real de los 3 motores (requiere los 3 detenidos, persiste en flash)");
+  Serial.println("CALVEL -> mide y empareja la velocidad real de los 3 motores contra el mas lento (requiere los 3 detenidos, persiste en flash)");
+  Serial.println("CALVEL M<1-3> <duty> -> igual, pero fija el motor indicado a ese duty y usa su velocidad como objetivo. Ej: CALVEL M3 225");
   Serial.println("Motor activo por defecto: 1.");
   Serial.println();
 

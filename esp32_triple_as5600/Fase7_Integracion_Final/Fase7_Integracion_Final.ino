@@ -369,8 +369,10 @@ void girarReversa(uint8_t m) {
 
 // ---------------- HOME (regreso a 0) - lazo cerrado simple, SIN PID ----------------
 //
-// Regla fija para los 3 motores (segun lo pedido): si el acumulado es
-// NEGATIVO se manda ADELANTE (F); si es POSITIVO se manda REVERSA (R).
+// Regla fija para los 3 motores, confirmada en hardware: F (adelante)
+// RESTA del acumulado y R (reversa) SUMA. Por lo tanto, para volver a 0:
+// si el acumulado es NEGATIVO se manda REVERSA (R, que suma y lo acerca
+// a 0); si es POSITIVO se manda ADELANTE (F, que resta y lo acerca a 0).
 // Se detiene al llegar dentro de la tolerancia. No hay ganancias ni
 // ajuste fino de velocidad - es control bang-bang, el mas simple posible.
 //
@@ -480,8 +482,8 @@ void actualizarHoming(uint8_t m) {
     return;
   }
 
-  // Regla fija: negativo -> adelante (F), positivo -> reversa (R).
-  bool debeIrAdelante = (grados < 0);
+  // Regla fija: negativo -> reversa (R, suma), positivo -> adelante (F, resta).
+  bool debeIrAdelante = (grados > 0);
   EstadoMotor direccionDeseada = debeIrAdelante ? ADELANTE : REVERSA;
 
   if (estadoMotor[m] != direccionDeseada) {

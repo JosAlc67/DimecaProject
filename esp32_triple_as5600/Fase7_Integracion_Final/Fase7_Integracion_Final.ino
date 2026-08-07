@@ -385,16 +385,18 @@ const uint32_t HOMING_MARGEN_PROGRESO_MS = 4000;   // debe mejorar el error en e
 
 // +1: mandar "adelante" (F) incrementa la posicion acumulada de ese motor.
 // -1: "adelante" (F) la disminuye (equivale a que "reversa" la incrementa).
-// Motor 1 (indice 0): confirmado en hardware que HOME se movia al reves
-// (se alejaba de 0 en vez de acercarse) -> signo invertido a -1.
-// Motores 2 y 3 siguen SIN VALIDAR: si al mandar HOME2/HOME3 el motor se
-// aleja de 0 en vez de acercarse, invierte tambien su signo aqui.
-int8_t signoHoming[3] = {-1, +1, +1};
+// Ya no hace falta adivinar/configurar esto a mano: si el sentido elegido
+// no logra acercarse a 0 en HOMING_MARGEN_PROGRESO_MS, actualizarHoming()
+// lo invierte automaticamente UNA vez y reintenta (ver mas abajo). El
+// valor que quede aqui despues de eso es el aprendido, valido mientras no
+// se reinicie el ESP32.
+int8_t signoHoming[3] = {+1, +1, +1};
 
 bool homingActivo[3]         = {false, false, false};
 uint32_t homingInicio[3]     = {0, 0, 0};
 uint32_t homingUltimoProgreso[3] = {0, 0, 0};
 float homingMejorError[3]    = {0, 0, 0};
+bool homingSentidoInvertidoYa[3] = {false, false, false};
 
 // Lee la posicion acumulada (continua, sin wraparound) en grados del
 // encoder correspondiente al motor `m` (0, 1 o 2).
@@ -442,6 +444,7 @@ void iniciarHoming(uint8_t m) {
   homingInicio[m] = millis();
   homingUltimoProgreso[m] = millis();
   homingMejorError[m] = fabs(grados);
+  homingSentidoInvertidoYa[m] = false;
   Serial.print("Motor ");
   Serial.print(m + 1);
   Serial.print(": iniciando HOME desde ");
@@ -481,8 +484,22 @@ void actualizarHoming(uint8_t m) {
     homingMejorError[m] = errorAbs;
     homingUltimoProgreso[m] = millis();
   } else if (millis() - homingUltimoProgreso[m] > HOMING_MARGEN_PROGRESO_MS) {
-    detenerHoming(m, "ABORTADO - no se acerca a 0. Revisa signoHoming[] o el acople mecanico.");
-    return;
+    if (!homingSentidoInvertidoYa[m]) {
+      // No progresa con el sentido actual: lo invierte UNA vez y reintenta.
+      // Si este nuevo sentido si funciona, signoHoming[m] queda asi
+      // "aprendido" para las proximas veces que se use HOME en este motor.
+      signoHoming[m] = -signoHoming[m];
+      homingSentidoInvertidoYa[m] = true;
+      homingMejorError[m] = errorAbs;
+      homingUltimoProgreso[m] = millis();
+      if (estadoMotor[m] != PARADO) detenerMotor(m);
+      Serial.print("Motor ");
+      Serial.print(m + 1);
+      Serial.println(": HOME no avanzaba, invirtiendo sentido y reintentando...");
+    } else {
+      detenerHoming(m, "ABORTADO - no se acerca a 0 en ningun sentido. Revisa el encoder/acople mecanico.");
+      return;
+    }
   }
 
   bool necesitaDisminuir = (grados > 0);

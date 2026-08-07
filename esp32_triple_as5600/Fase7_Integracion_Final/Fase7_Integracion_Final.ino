@@ -95,7 +95,12 @@ void imprimirAS5600(const char *nombre, bool ok, uint16_t raw, bool imanOk) {
 
 const uint32_t PWM_FREQ_HZ    = 20000;
 const uint8_t  PWM_RES_BITS   = 8;
-const uint8_t  VELOCIDAD_BAJA = 60;
+// 60 (~23%) resulto insuficiente para vencer la friccion estatica de los
+// motores (no arrancaban). 255 (100%) si arranco, confirmado en pruebas,
+// pero no se quiere dejar al maximo como velocidad "baja" por defecto.
+// 150 (~59%) es un valor intermedio SIN VALIDAR EN HARDWARE todavia:
+// confirma que los 3 motores arrancan con este valor, o ajustalo.
+const uint8_t  VELOCIDAD_BAJA = 150;
 
 const uint8_t PIN_RPWM[3] = {25, 27, 19};
 const uint8_t PIN_LPWM[3] = {26, 18, 23};

@@ -397,13 +397,16 @@ float homingMejorError[3]    = {0, 0, 0};
 
 // Lee la posicion acumulada (continua, sin wraparound) en grados del
 // encoder correspondiente al motor `m` (0, 1 o 2).
+// Mapeo fisico confirmado por el usuario: AS5600 #1 esta en el eje del
+// Motor 3, y AS5600 #3 esta en el eje del Motor 1 (cruzados). AS5600 #2
+// si corresponde al Motor 2.
 bool leerAnguloAcumuladoGrados(uint8_t m, float &grados) {
   int32_t posRaw;
   bool ok;
   switch (m) {
-    case 0: ok = comOk1; posRaw = as5600_1.getCumulativePosition(false); break;
-    case 1: ok = comOk2; posRaw = as5600_2.getCumulativePosition(false); break;
-    case 2: ok = comOk3; posRaw = posicionAcum3; break;
+    case 0: ok = comOk3; posRaw = posicionAcum3; break;                    // Motor 1 -> AS5600 #3
+    case 1: ok = comOk2; posRaw = as5600_2.getCumulativePosition(false); break; // Motor 2 -> AS5600 #2
+    case 2: ok = comOk1; posRaw = as5600_1.getCumulativePosition(false); break; // Motor 3 -> AS5600 #1
     default: return false;
   }
   if (!ok) return false;
@@ -493,6 +496,21 @@ void actualizarHoming(uint8_t m) {
   }
 }
 
+// Imprime el estado de los 3 encoders bajo demanda (comando STATUS), en vez
+// de hacerlo automaticamente cada cierto tiempo - eso generaba demasiado
+// ruido visual en el Monitor Serial.
+void imprimirEstadoCompleto() {
+  bool imanOk1 = comOk1 && as5600_1.magnetDetected();
+  bool imanOk2 = comOk2 && as5600_2.magnetDetected();
+  uint8_t st3 = 0;
+  bool imanOk3 = comOk3 && leerReg8_bus3(AS5600_REG_STATUS, st3) && (st3 & AS5600_STATUS_MD);
+
+  imprimirPosicion("AS5600 #1", comOk1, as5600_1.getCumulativePosition(false), as5600_1.getRevolutions(), imanOk1);
+  imprimirPosicion("AS5600 #2", comOk2, as5600_2.getCumulativePosition(false), as5600_2.getRevolutions(), imanOk2);
+  imprimirPosicion("AS5600 #3", comOk3, posicionAcum3, revoluciones3(), imanOk3);
+  Serial.println("---");
+}
+
 void procesarComando(String cmd) {
   cmd.trim();
   cmd.toUpperCase();
@@ -516,15 +534,13 @@ void procesarComando(String cmd) {
   else if (cmd == "HOME") {
     for (uint8_t i = 0; i < 3; i++) iniciarHoming(i);
   }
+  else if (cmd == "STATUS") imprimirEstadoCompleto();
   else if (cmd.length() > 0) {
-    Serial.println("Comando no reconocido. Usa: M1 M2 M3 F R S SS CAL1 CAL2 CAL3 HOME1 HOME2 HOME3 HOME");
+    Serial.println("Comando no reconocido. Usa: M1 M2 M3 F R S SS CAL1 CAL2 CAL3 HOME1 HOME2 HOME3 HOME STATUS");
   }
 }
 
 // ---------------- Programa principal ----------------
-
-const uint32_t INTERVALO_LECTURA_MS = 500;
-uint32_t ultimaLectura = 0;
 
 void setup() {
   Serial.begin(115200);
@@ -583,10 +599,9 @@ void setup() {
   Serial.println("Comandos: M1 M2 M3 (seleccionar motor) | F (adelante) | R (reversa) | S (detener) | SS (parada de emergencia)");
   Serial.println("Calibracion: CAL1 CAL2 CAL3 -> fija 0 deg en la posicion fisica actual de ese eje (persiste en flash)");
   Serial.println("HOME: HOME1 HOME2 HOME3 (un motor) | HOME (los 3 a la vez) -> regreso a 0 en lazo cerrado, sin PID");
-  Serial.println("Motor activo por defecto: 1. Angulos se imprimen cada 500 ms.");
+  Serial.println("STATUS -> imprime el angulo/vueltas de los 3 encoders (ya no se imprime solo, para no saturar el Monitor Serial)");
+  Serial.println("Motor activo por defecto: 1.");
   Serial.println();
-
-  ultimaLectura = millis();
 }
 
 void loop() {
@@ -611,20 +626,4 @@ void loop() {
   actualizarHoming(0);
   actualizarHoming(1);
   actualizarHoming(2);
-
-  uint32_t ahora = millis();
-  if (ahora - ultimaLectura >= INTERVALO_LECTURA_MS) {
-    ultimaLectura = ahora;
-
-    bool imanOk1 = comOk1 && as5600_1.magnetDetected();
-    bool imanOk2 = comOk2 && as5600_2.magnetDetected();
-    uint8_t st3 = 0;
-    bool imanOk3 = comOk3 && leerReg8_bus3(AS5600_REG_STATUS, st3) && (st3 & AS5600_STATUS_MD);
-
-    imprimirPosicion("AS5600 #1", comOk1, as5600_1.getCumulativePosition(false), as5600_1.getRevolutions(), imanOk1);
-    imprimirPosicion("AS5600 #2", comOk2, as5600_2.getCumulativePosition(false), as5600_2.getRevolutions(), imanOk2);
-    imprimirPosicion("AS5600 #3", comOk3, posicionAcum3, revoluciones3(), imanOk3);
-
-    Serial.println("---");
-  }
 }

@@ -21,10 +21,23 @@
 //   R             -> gira el motor activo en reversa a baja velocidad
 //   S             -> detiene el motor activo
 //   SS            -> PARADA DE EMERGENCIA: detiene los 3 motores ya
+//   CAL1/CAL2/CAL3-> calibra el cero de ese encoder en la posicion FISICA
+//                    actual del eje (queda guardado en flash, sobrevive
+//                    a reinicios). Esto NO reduce el error de +-1.5 grados
+//                    de linealidad (eso requiere una referencia externa
+//                    y se deja para otra sesion) - solo fija donde esta
+//                    el 0 grados de cada sensor.
+//
+// IMPORTANTE sobre la calibracion: el offset guardado desplaza donde cae
+// el 0 grados, pero SIGUE existiendo un salto (wrap) de 359.99->0 en algun
+// punto de la vuelta - simplemente ese punto ahora coincide con la
+// posicion fisica que elegiste al calibrar, en vez de con el 0 electrico
+// original del chip.
 
 #include <Wire.h>
 #include <AS5600.h>
 #include <ESP32_SoftWire.h>
+#include <Preferences.h>
 
 // ---------------- Encoders ----------------
 
@@ -36,6 +49,33 @@
 AS5600 as5600_1(&Wire);
 AS5600 as5600_2(&Wire1);
 SoftWire i2c3;
+
+// ---------------- Calibracion (offset de cero) persistente en NVS ----------------
+
+Preferences prefs;
+const char *NVS_NAMESPACE = "as5600cal";
+
+// Offset del sensor #3, aplicado a mano (no hay libreria para el bus software).
+// Se guarda/lee como entero de 0 a 4095 (mismo convenio que usa la libreria
+// AS5600 internamente para offsets negativos via complemento a 2 en 12 bits).
+int16_t offsetRaw3 = 0;
+
+int16_t cargarOffsetRaw(uint8_t indice) {
+  char clave[8];
+  snprintf(clave, sizeof(clave), "off%u", indice);
+  prefs.begin(NVS_NAMESPACE, true); // solo lectura
+  int16_t valor = prefs.getShort(clave, 0);
+  prefs.end();
+  return valor;
+}
+
+void guardarOffsetRaw(uint8_t indice, int16_t offsetRaw) {
+  char clave[8];
+  snprintf(clave, sizeof(clave), "off%u", indice);
+  prefs.begin(NVS_NAMESPACE, false); // lectura/escritura
+  prefs.putShort(clave, offsetRaw);
+  prefs.end();
+}
 
 bool leerReg16_bus3(uint8_t reg, uint16_t &valor) {
   i2c3.beginTransmission(AS5600_ADDR);
@@ -59,10 +99,20 @@ bool leerReg8_bus3(uint8_t reg, uint8_t &valor) {
   return true;
 }
 
-bool leerAS5600_3(uint16_t &raw, bool &imanOk) {
+// Lectura CRUDA del sensor #3, sin aplicar offset de calibracion. Se usa
+// tanto dentro de leerAS5600_3() como para tomar la referencia al calibrar.
+bool leerRawSinCalibrar_bus3(uint16_t &raw) {
   uint16_t v;
   if (!leerReg16_bus3(AS5600_REG_RAW_ANGLE, v)) return false;
   raw = v & 0x0FFF;
+  return true;
+}
+
+bool leerAS5600_3(uint16_t &raw, bool &imanOk) {
+  uint16_t crudo;
+  if (!leerRawSinCalibrar_bus3(crudo)) return false;
+  raw = (crudo + offsetRaw3) & 0x0FFF;
+
   uint8_t stReg = 0;
   imanOk = leerReg8_bus3(AS5600_REG_STATUS, stReg) && (stReg & AS5600_STATUS_MD);
   return true;
@@ -83,6 +133,47 @@ void imprimirAS5600(const char *nombre, bool ok, uint16_t raw, bool imanOk) {
   Serial.print(" deg");
   if (!imanOk) Serial.print("  (SIN IMAN)");
   Serial.println();
+}
+
+// Calibra el sensor `indice` (1, 2 o 3) para que la posicion FISICA actual
+// del eje pase a leerse como 0 grados. offsetRaw = (4096 - crudo) & 0x0FFF
+// es el mismo truco de complemento a 2 en 12 bits que usa internamente
+// AS5600::setOffset() para offsets negativos (verificado en el codigo
+// fuente de la libreria): sumar ese offset y enmascarar a 12 bits equivale
+// a restar el valor crudo original, sin importar el signo.
+void calibrarSensor(uint8_t indice) {
+  if (indice == 1) {
+    as5600_1.setOffset(0);
+    uint16_t crudo = as5600_1.rawAngle();
+    if (as5600_1.lastError() != 0) {
+      Serial.println("ERROR: no se pudo leer AS5600 #1 para calibrar.");
+      return;
+    }
+    int16_t offsetRaw = (4096 - crudo) & 0x0FFF;
+    as5600_1.setOffset(offsetRaw * AS5600_RAW_TO_DEGREES);
+    guardarOffsetRaw(1, offsetRaw);
+    Serial.println("AS5600 #1 calibrado: posicion actual = 0.00 deg (guardado en flash).");
+  } else if (indice == 2) {
+    as5600_2.setOffset(0);
+    uint16_t crudo = as5600_2.rawAngle();
+    if (as5600_2.lastError() != 0) {
+      Serial.println("ERROR: no se pudo leer AS5600 #2 para calibrar.");
+      return;
+    }
+    int16_t offsetRaw = (4096 - crudo) & 0x0FFF;
+    as5600_2.setOffset(offsetRaw * AS5600_RAW_TO_DEGREES);
+    guardarOffsetRaw(2, offsetRaw);
+    Serial.println("AS5600 #2 calibrado: posicion actual = 0.00 deg (guardado en flash).");
+  } else if (indice == 3) {
+    uint16_t crudo;
+    if (!leerRawSinCalibrar_bus3(crudo)) {
+      Serial.println("ERROR: no se pudo leer AS5600 #3 para calibrar.");
+      return;
+    }
+    offsetRaw3 = (4096 - crudo) & 0x0FFF;
+    guardarOffsetRaw(3, offsetRaw3);
+    Serial.println("AS5600 #3 calibrado: posicion actual = 0.00 deg (guardado en flash).");
+  }
 }
 
 // ---------------- Motores (BTS7960) ----------------
@@ -195,6 +286,9 @@ void procesarComando(String cmd) {
     for (uint8_t i = 0; i < 3; i++) detenerMotor(i);
     Serial.println("PARADA DE EMERGENCIA: los 3 motores detenidos.");
   }
+  else if (cmd == "CAL1") calibrarSensor(1);
+  else if (cmd == "CAL2") calibrarSensor(2);
+  else if (cmd == "CAL3") calibrarSensor(3);
   else if (cmd.length() > 0) {
     Serial.println("Comando no reconocido. Usa: M1 M2 M3 F R S SS");
   }
@@ -224,6 +318,19 @@ void setup() {
   bool imanTest;
   Serial.println(leerAS5600_3(rawTest, imanTest) ? "OK: AS5600 #3" : "ERROR: AS5600 #3 no responde al iniciar");
 
+  // Restaura offsets de calibracion guardados en flash (si existen).
+  int16_t off1 = cargarOffsetRaw(1);
+  int16_t off2 = cargarOffsetRaw(2);
+  offsetRaw3    = cargarOffsetRaw(3);
+  as5600_1.setOffset(off1 * AS5600_RAW_TO_DEGREES);
+  as5600_2.setOffset(off2 * AS5600_RAW_TO_DEGREES);
+  Serial.print("Offsets cargados de flash -> #1: ");
+  Serial.print(off1);
+  Serial.print(" | #2: ");
+  Serial.print(off2);
+  Serial.print(" | #3: ");
+  Serial.println(offsetRaw3);
+
   for (uint8_t i = 0; i < 3; i++) {
 #if CORE_LEDC_V3
     configurarPWM(PIN_RPWM[i], 0);
@@ -237,6 +344,7 @@ void setup() {
 
   Serial.println();
   Serial.println("Comandos: M1 M2 M3 (seleccionar motor) | F (adelante) | R (reversa) | S (detener) | SS (parada de emergencia)");
+  Serial.println("Calibracion: CAL1 CAL2 CAL3 -> fija 0 deg en la posicion fisica actual de ese eje (persiste en flash)");
   Serial.println("Motor activo por defecto: 1. Angulos se imprimen cada 500 ms.");
   Serial.println();
 

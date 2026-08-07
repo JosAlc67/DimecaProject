@@ -369,34 +369,27 @@ void girarReversa(uint8_t m) {
 
 // ---------------- HOME (regreso a 0) - lazo cerrado simple, SIN PID ----------------
 //
-// "Si no estas en 0, muevete hacia 0 a VELOCIDAD_BAJA; detente al llegar."
-// No hay ganancias ni ajuste fino de velocidad - es control bang-bang, el
-// mas simple que existe. Asume que AS5600 #N esta en el mismo eje que
-// Motor N (#1<->#1, #2<->#2, #3<->#3) - SIN VERIFICAR, confirmalo.
+// Regla fija para los 3 motores (segun lo pedido): si el acumulado es
+// NEGATIVO se manda ADELANTE (F); si es POSITIVO se manda REVERSA (R).
+// Se detiene al llegar dentro de la tolerancia. No hay ganancias ni
+// ajuste fino de velocidad - es control bang-bang, el mas simple posible.
 //
-// Incluye dos protecciones para no empujar indefinidamente en una
-// direccion incorrecta:
-//  - Si no mejora el error en HOMING_MARGEN_PROGRESO_MS, aborta.
-//  - Si se excede HOMING_TIMEOUT_MS en total, aborta.
+// Mapeo motor->encoder confirmado por el usuario: 1-1, 2-2, 3-3 (sin cruces).
+//
+// Se mantiene una sola proteccion: si no mejora el error en
+// HOMING_MARGEN_PROGRESO_MS, o si se excede HOMING_TIMEOUT_MS en total,
+// aborta y detiene el motor - con la regla fija, si esto pasa es señal de
+// un problema real (encoder desacoplado, motor sin fuerza, etc.), no de
+// un signo mal elegido.
 
 const float    TOLERANCIA_HOMING_DEG     = 3.0f;   // se considera "en home" dentro de esto
 const uint32_t HOMING_TIMEOUT_MS         = 20000;  // aborta si tarda mas de esto en total
 const uint32_t HOMING_MARGEN_PROGRESO_MS = 4000;   // debe mejorar el error en este tiempo
 
-// +1: mandar "adelante" (F) incrementa la posicion acumulada de ese motor.
-// -1: "adelante" (F) la disminuye (equivale a que "reversa" la incrementa).
-// Ya no hace falta adivinar/configurar esto a mano: si el sentido elegido
-// no logra acercarse a 0 en HOMING_MARGEN_PROGRESO_MS, actualizarHoming()
-// lo invierte automaticamente UNA vez y reintenta (ver mas abajo). El
-// valor que quede aqui despues de eso es el aprendido, valido mientras no
-// se reinicie el ESP32.
-int8_t signoHoming[3] = {+1, +1, +1};
-
 bool homingActivo[3]         = {false, false, false};
 uint32_t homingInicio[3]     = {0, 0, 0};
 uint32_t homingUltimoProgreso[3] = {0, 0, 0};
 float homingMejorError[3]    = {0, 0, 0};
-bool homingSentidoInvertidoYa[3] = {false, false, false};
 
 // Lee la posicion acumulada (continua, sin wraparound) en grados del
 // encoder correspondiente al motor `m` (0, 1 o 2).
@@ -444,7 +437,6 @@ void iniciarHoming(uint8_t m) {
   homingInicio[m] = millis();
   homingUltimoProgreso[m] = millis();
   homingMejorError[m] = fabs(grados);
-  homingSentidoInvertidoYa[m] = false;
   Serial.print("Motor ");
   Serial.print(m + 1);
   Serial.print(": iniciando HOME desde ");
@@ -484,26 +476,12 @@ void actualizarHoming(uint8_t m) {
     homingMejorError[m] = errorAbs;
     homingUltimoProgreso[m] = millis();
   } else if (millis() - homingUltimoProgreso[m] > HOMING_MARGEN_PROGRESO_MS) {
-    if (!homingSentidoInvertidoYa[m]) {
-      // No progresa con el sentido actual: lo invierte UNA vez y reintenta.
-      // Si este nuevo sentido si funciona, signoHoming[m] queda asi
-      // "aprendido" para las proximas veces que se use HOME en este motor.
-      signoHoming[m] = -signoHoming[m];
-      homingSentidoInvertidoYa[m] = true;
-      homingMejorError[m] = errorAbs;
-      homingUltimoProgreso[m] = millis();
-      if (estadoMotor[m] != PARADO) detenerMotor(m);
-      Serial.print("Motor ");
-      Serial.print(m + 1);
-      Serial.println(": HOME no avanzaba, invirtiendo sentido y reintentando...");
-    } else {
-      detenerHoming(m, "ABORTADO - no se acerca a 0 en ningun sentido. Revisa el encoder/acople mecanico.");
-      return;
-    }
+    detenerHoming(m, "ABORTADO - no se acerca a 0. Revisa el encoder/acople mecanico.");
+    return;
   }
 
-  bool necesitaDisminuir = (grados > 0);
-  bool debeIrAdelante = (signoHoming[m] > 0) ? !necesitaDisminuir : necesitaDisminuir;
+  // Regla fija: negativo -> adelante (F), positivo -> reversa (R).
+  bool debeIrAdelante = (grados < 0);
   EstadoMotor direccionDeseada = debeIrAdelante ? ADELANTE : REVERSA;
 
   if (estadoMotor[m] != direccionDeseada) {

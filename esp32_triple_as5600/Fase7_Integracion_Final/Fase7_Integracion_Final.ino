@@ -459,17 +459,34 @@ void girarReversa(uint8_t m) {
 // Esto es calibracion de lazo abierto (se mide una vez, se fija un duty
 // nuevo y listo) - no es control de velocidad en tiempo real ni PID.
 
-const uint32_t CALVEL_DURACION_MS = 1500; // cuanto tiempo gira cada motor para medir
+// 3000ms (antes 1500ms): con una ventana corta, el transitorio de arranque
+// (fraccion de segundo hasta alcanzar velocidad estable) pesa demasiado en
+// la medicion y da resultados poco repetibles entre corridas (~10% de
+// variacion observada en hardware con 1.5s). Una ventana mas larga diluye
+// ese transitorio y promedia mejor cualquier variacion de corto plazo.
+const uint32_t CALVEL_DURACION_MS = 3000;
 
 // Gira el motor `m` hacia adelante durante `duracionMs` y devuelve la
 // velocidad medida en grados/segundo (valor absoluto). Requiere que el
 // motor este detenido antes de llamar.
+//
+// Usa un sondeo periodico (actualizarEncoders() cada 20ms) en vez de un
+// solo delay() largo: si se usara un delay() bloqueante único con una
+// ventana larga, y el motor llegara a girar mas de media vuelta durante
+// esa espera, el algoritmo de deteccion de vuelta se confundiria (el
+// mismo riesgo que ya se resolvio para loop() en general, aqui reaparece
+// si la ventana de medicion es larga y no se refresca seguido).
 float medirVelocidadGrados(uint8_t m, uint32_t duracionMs) {
   actualizarEncoders(); // asegura que "antes" sea una lectura fresca
   int32_t antes = leerPosicionAcumRaw(m);
   girarAdelante(m);
-  delay(duracionMs); // bloqueante a proposito: es una medicion corta y unica, no una operacion continua
-  actualizarEncoders(); // el delay() bloqueo loop(), hay que refrescar a mano antes de leer "despues"
+
+  uint32_t inicio = millis();
+  while (millis() - inicio < duracionMs) {
+    actualizarEncoders();
+    delay(20);
+  }
+
   detenerMotor(m);
   int32_t despues = leerPosicionAcumRaw(m);
 

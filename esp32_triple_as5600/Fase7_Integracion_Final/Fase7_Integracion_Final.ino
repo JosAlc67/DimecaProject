@@ -22,17 +22,39 @@
 //   S             -> detiene el motor activo
 //   SS            -> PARADA DE EMERGENCIA: detiene los 3 motores ya
 //   CAL1/CAL2/CAL3-> calibra el cero de ese encoder en la posicion FISICA
-//                    actual del eje (queda guardado en flash, sobrevive
-//                    a reinicios). Esto NO reduce el error de +-1.5 grados
-//                    de linealidad (eso requiere una referencia externa
-//                    y se deja para otra sesion) - solo fija donde esta
-//                    el 0 grados de cada sensor.
+//                    actual del eje (offset queda guardado en flash,
+//                    sobrevive a reinicios). Esto NO reduce el error de
+//                    +-1.5 grados de linealidad (eso requiere una
+//                    referencia externa y se deja para otra sesion) -
+//                    solo fija donde esta el 0 grados de cada sensor,
+//                    y ese mismo punto pasa a ser tambien "0 vueltas".
 //
-// IMPORTANTE sobre la calibracion: el offset guardado desplaza donde cae
-// el 0 grados, pero SIGUE existiendo un salto (wrap) de 359.99->0 en algun
-// punto de la vuelta - simplemente ese punto ahora coincide con la
-// posicion fisica que elegiste al calibrar, en vez de con el 0 electrico
-// original del chip.
+// SEGUIMIENTO DE VUELTAS COMPLETAS (multi-turn):
+// Los ejes pueden dar varias vueltas completas, asi que ademas del angulo
+// dentro de la vuelta actual (0-359.99, con el salto de siempre en la
+// frontera) se lleva una POSICION ACUMULADA continua que nunca se reinicia
+// sola: sigue sumando o restando aunque cruces 360 grados una y otra vez.
+// Para #1/#2 se usa getCumulativePosition()/getRevolutions() de la propia
+// libreria AS5600 (verificado en su codigo fuente). Para #3 (bus por
+// software, sin libreria) se replica a mano el mismo algoritmo exacto.
+// Esa posicion acumulada es la que conviene usar como variable de PID mas
+// adelante: al no reiniciarse nunca en 0, no sufre el problema de "salto
+// enorme de error" que sí tiene el angulo 0-359.99 cerca de la frontera.
+//
+// IMPORTANTE - limitacion: el conteo de vueltas vive solo en RAM. Si el
+// ESP32 se apaga/reinicia, las vueltas se pierden y se vuelve a contar
+// desde 0 en el punto donde haya quedado la calibracion guardada en flash
+// (el offset de grados SI sobrevive, el conteo de vueltas NO). Si en algun
+// momento necesitas que el conteo de vueltas tambien sobreviva un apagado,
+// avisame - se puede hacer pero implica guardar en flash periodicamente
+// (no en cada lectura, por desgaste de la memoria flash).
+//
+// IMPORTANTE - requisito de velocidad de actualizacion: el algoritmo de
+// conteo de vueltas se rompe si el eje gira mas de media vuelta (180 grados)
+// entre dos actualizaciones consecutivas. Por eso la actualizacion de
+// posicion ocurre en CADA iteracion de loop() (no solo cada 500ms como la
+// impresion por Serial) - mientras el motor no gire absurdamente rapido
+// entre dos iteraciones de loop(), esto tiene margen de sobra.
 
 #include <Wire.h>
 #include <AS5600.h>
@@ -42,7 +64,12 @@
 // ---------------- Encoders ----------------
 
 #define AS5600_ADDR           0x36
-#define AS5600_REG_RAW_ANGLE   0x0C
+#define AS5600_REG_ANGLE        0x0E  // registro CON histeresis; el mismo
+                                       // que usa internamente readAngle()
+                                       // de la libreria, y por lo tanto el
+                                       // mismo que usa getCumulativePosition().
+                                       // Se usa aqui para que el sensor #3
+                                       // sea consistente con #1/#2.
 #define AS5600_REG_STATUS      0x0B
 #define AS5600_STATUS_MD       0x20
 
@@ -99,80 +126,143 @@ bool leerReg8_bus3(uint8_t reg, uint8_t &valor) {
   return true;
 }
 
-// Lectura CRUDA del sensor #3, sin aplicar offset de calibracion. Se usa
-// tanto dentro de leerAS5600_3() como para tomar la referencia al calibrar.
-bool leerRawSinCalibrar_bus3(uint16_t &raw) {
+// Lectura del angulo (registro 0x0E, con offset de calibracion aplicado)
+// del sensor #3. Es el camino RAPIDO, sin leer el registro de estado, para
+// no cargar el bus por software durante la actualizacion de cada iteracion
+// de loop(). El estado del iman se revisa aparte, solo al imprimir.
+bool leerAnguloConOffset_bus3(uint16_t &raw) {
   uint16_t v;
-  if (!leerReg16_bus3(AS5600_REG_RAW_ANGLE, v)) return false;
-  raw = v & 0x0FFF;
+  if (!leerReg16_bus3(AS5600_REG_ANGLE, v)) return false;
+  raw = ((v & 0x0FFF) + offsetRaw3) & 0x0FFF;
   return true;
 }
 
 bool leerAS5600_3(uint16_t &raw, bool &imanOk) {
-  uint16_t crudo;
-  if (!leerRawSinCalibrar_bus3(crudo)) return false;
-  raw = (crudo + offsetRaw3) & 0x0FFF;
-
+  if (!leerAnguloConOffset_bus3(raw)) return false;
   uint8_t stReg = 0;
   imanOk = leerReg8_bus3(AS5600_REG_STATUS, stReg) && (stReg & AS5600_STATUS_MD);
   return true;
 }
 
-void imprimirAS5600(const char *nombre, bool ok, uint16_t raw, bool imanOk) {
+// ---------------- Seguimiento de vueltas completas (multi-turn) ----------------
+//
+// Para el sensor #3 se replica a mano el mismo algoritmo que usa
+// AS5600::getCumulativePosition()/getRevolutions() en la libreria de
+// RobTillaart (verificado en su codigo fuente): compara la lectura actual
+// contra la anterior, y si el salto es mayor a media vuelta (2048 cuentas
+// de 4096), asume que se cruzo la frontera 0/4095 y suma o resta una
+// vuelta completa segun el sentido.
+
+int32_t posicionAcum3   = 0;
+int16_t ultimaPosicion3 = 0;
+bool    primeraLectura3 = true;
+
+bool actualizarPosicion3() {
+  uint16_t raw;
+  if (!leerAnguloConOffset_bus3(raw)) return false;
+  int16_t value = (int16_t)raw;
+
+  if (primeraLectura3) {
+    ultimaPosicion3 = value;
+    primeraLectura3 = false;
+    return true;
+  }
+
+  if ((ultimaPosicion3 > 2048) && (value < (ultimaPosicion3 - 2048))) {
+    posicionAcum3 = posicionAcum3 + 4096 - ultimaPosicion3 + value;      // vuelta completa CW
+  } else if ((value > 2048) && (ultimaPosicion3 < (value - 2048))) {
+    posicionAcum3 = posicionAcum3 - 4096 - ultimaPosicion3 + value;      // vuelta completa CCW
+  } else {
+    posicionAcum3 = posicionAcum3 - ultimaPosicion3 + value;
+  }
+  ultimaPosicion3 = value;
+  return true;
+}
+
+int32_t revoluciones3() {
+  int32_t p = posicionAcum3 >> 12; // dividir por 4096
+  if (p < 0) p++;                  // corrige el redondeo de numeros negativos
+  return p;
+}
+
+// Fija la posicion acumulada actual como punto de partida `nuevaPosicion`
+// (normalmente 0), resincronizando tambien la referencia interna para que
+// el proximo actualizarPosicion3() no calcule un salto falso.
+void resetPosicionAcumulada3(int32_t nuevaPosicion) {
+  uint16_t raw;
+  leerAnguloConOffset_bus3(raw);
+  ultimaPosicion3 = (int16_t)raw;
+  posicionAcum3 = nuevaPosicion;
+}
+
+void imprimirPosicion(const char *nombre, bool ok, int32_t posicionRaw, int32_t vueltas, bool imanOk) {
   if (!ok) {
     Serial.print(nombre);
     Serial.println(": SIN COMUNICACION I2C");
     return;
   }
-  float deg = raw * 360.0f / 4096.0f;
+  int32_t dentroDeVuelta = posicionRaw % 4096;
+  if (dentroDeVuelta < 0) dentroDeVuelta += 4096;
+  float anguloDentroDeVuelta = dentroDeVuelta * 360.0f / 4096.0f;
+  float anguloAcumulado = posicionRaw * 360.0f / 4096.0f;
+
   Serial.print(nombre);
   Serial.print(": ");
-  Serial.print(raw);
-  Serial.print(" -> ");
-  Serial.print(deg, 2);
+  Serial.print(anguloDentroDeVuelta, 2);
+  Serial.print(" deg (vuelta actual) | vueltas=");
+  Serial.print(vueltas);
+  Serial.print(" | acumulado=");
+  Serial.print(anguloAcumulado, 2);
   Serial.print(" deg");
   if (!imanOk) Serial.print("  (SIN IMAN)");
   Serial.println();
 }
 
 // Calibra el sensor `indice` (1, 2 o 3) para que la posicion FISICA actual
-// del eje pase a leerse como 0 grados. offsetRaw = (4096 - crudo) & 0x0FFF
-// es el mismo truco de complemento a 2 en 12 bits que usa internamente
-// AS5600::setOffset() para offsets negativos (verificado en el codigo
-// fuente de la libreria): sumar ese offset y enmascarar a 12 bits equivale
-// a restar el valor crudo original, sin importar el signo.
+// del eje pase a leerse como 0 grados Y como 0 vueltas. offsetRaw =
+// (4096 - crudo) & 0x0FFF es el mismo truco de complemento a 2 en 12 bits
+// que usa internamente AS5600::setOffset() para offsets negativos
+// (verificado en el codigo fuente de la libreria): sumar ese offset y
+// enmascarar a 12 bits equivale a restar el valor crudo original, sin
+// importar el signo. Tras fijar el offset, se resincroniza el contador de
+// vueltas a 0 en ese mismo punto - si no se hiciera esto, el cambio de
+// offset se interpretaria como un salto fisico y corromperia el conteo.
 void calibrarSensor(uint8_t indice) {
   if (indice == 1) {
     as5600_1.setOffset(0);
-    uint16_t crudo = as5600_1.rawAngle();
+    uint16_t crudo = as5600_1.readAngle();
     if (as5600_1.lastError() != 0) {
       Serial.println("ERROR: no se pudo leer AS5600 #1 para calibrar.");
       return;
     }
     int16_t offsetRaw = (4096 - crudo) & 0x0FFF;
     as5600_1.setOffset(offsetRaw * AS5600_RAW_TO_DEGREES);
+    as5600_1.resetCumulativePosition(0);
     guardarOffsetRaw(1, offsetRaw);
-    Serial.println("AS5600 #1 calibrado: posicion actual = 0.00 deg (guardado en flash).");
+    Serial.println("AS5600 #1 calibrado: posicion actual = 0.00 deg, 0 vueltas (offset guardado en flash).");
   } else if (indice == 2) {
     as5600_2.setOffset(0);
-    uint16_t crudo = as5600_2.rawAngle();
+    uint16_t crudo = as5600_2.readAngle();
     if (as5600_2.lastError() != 0) {
       Serial.println("ERROR: no se pudo leer AS5600 #2 para calibrar.");
       return;
     }
     int16_t offsetRaw = (4096 - crudo) & 0x0FFF;
     as5600_2.setOffset(offsetRaw * AS5600_RAW_TO_DEGREES);
+    as5600_2.resetCumulativePosition(0);
     guardarOffsetRaw(2, offsetRaw);
-    Serial.println("AS5600 #2 calibrado: posicion actual = 0.00 deg (guardado en flash).");
+    Serial.println("AS5600 #2 calibrado: posicion actual = 0.00 deg, 0 vueltas (offset guardado en flash).");
   } else if (indice == 3) {
     uint16_t crudo;
-    if (!leerRawSinCalibrar_bus3(crudo)) {
+    if (!leerReg16_bus3(AS5600_REG_ANGLE, crudo)) {
       Serial.println("ERROR: no se pudo leer AS5600 #3 para calibrar.");
       return;
     }
+    crudo &= 0x0FFF;
     offsetRaw3 = (4096 - crudo) & 0x0FFF;
+    resetPosicionAcumulada3(0);
     guardarOffsetRaw(3, offsetRaw3);
-    Serial.println("AS5600 #3 calibrado: posicion actual = 0.00 deg (guardado en flash).");
+    Serial.println("AS5600 #3 calibrado: posicion actual = 0.00 deg, 0 vueltas (offset guardado en flash).");
   }
 }
 
@@ -331,6 +421,16 @@ void setup() {
   Serial.print(" | #3: ");
   Serial.println(offsetRaw3);
 
+  // IMPORTANTE: inicializa la referencia interna de seguimiento de vueltas
+  // con la posicion FISICA real actual (no con 0 a secas). Sin este paso,
+  // la primera llamada a getCumulativePosition()/actualizarPosicion3()
+  // podria interpretar la diferencia entre "0 por defecto" y la posicion
+  // real como si fuera una vuelta completa que nunca ocurrio.
+  as5600_1.resetCumulativePosition(0);
+  as5600_2.resetCumulativePosition(0);
+  resetPosicionAcumulada3(0);
+  Serial.println("Conteo de vueltas iniciado en 0 para los 3 sensores (vive solo en RAM, no sobrevive un reinicio).");
+
   for (uint8_t i = 0; i < 3; i++) {
 #if CORE_LEDC_V3
     configurarPWM(PIN_RPWM[i], 0);
@@ -351,28 +451,37 @@ void setup() {
   ultimaLectura = millis();
 }
 
+bool comOk1 = false, comOk2 = false, comOk3 = false;
+
 void loop() {
   if (Serial.available()) {
     String linea = Serial.readStringUntil('\n');
     procesarComando(linea);
   }
 
+  // Actualizacion RAPIDA del conteo de vueltas: se hace en cada iteracion
+  // de loop(), no solo cuando toca imprimir, porque si el eje gira mas de
+  // media vuelta entre dos actualizaciones el algoritmo pierde la cuenta.
+  as5600_1.getCumulativePosition(true);
+  comOk1 = (as5600_1.lastError() == 0);
+
+  as5600_2.getCumulativePosition(true);
+  comOk2 = (as5600_2.lastError() == 0);
+
+  comOk3 = actualizarPosicion3();
+
   uint32_t ahora = millis();
   if (ahora - ultimaLectura >= INTERVALO_LECTURA_MS) {
     ultimaLectura = ahora;
 
-    bool conectado1 = as5600_1.isConnected();
-    imprimirAS5600("AS5600 #1", conectado1, conectado1 ? as5600_1.rawAngle() : 0,
-                    conectado1 ? as5600_1.magnetDetected() : false);
+    bool imanOk1 = comOk1 && as5600_1.magnetDetected();
+    bool imanOk2 = comOk2 && as5600_2.magnetDetected();
+    uint8_t st3 = 0;
+    bool imanOk3 = comOk3 && leerReg8_bus3(AS5600_REG_STATUS, st3) && (st3 & AS5600_STATUS_MD);
 
-    bool conectado2 = as5600_2.isConnected();
-    imprimirAS5600("AS5600 #2", conectado2, conectado2 ? as5600_2.rawAngle() : 0,
-                    conectado2 ? as5600_2.magnetDetected() : false);
-
-    uint16_t raw3;
-    bool iman3;
-    bool conectado3 = leerAS5600_3(raw3, iman3);
-    imprimirAS5600("AS5600 #3", conectado3, raw3, iman3);
+    imprimirPosicion("AS5600 #1", comOk1, as5600_1.getCumulativePosition(false), as5600_1.getRevolutions(), imanOk1);
+    imprimirPosicion("AS5600 #2", comOk2, as5600_2.getCumulativePosition(false), as5600_2.getRevolutions(), imanOk2);
+    imprimirPosicion("AS5600 #3", comOk3, posicionAcum3, revoluciones3(), imanOk3);
 
     Serial.println("---");
   }

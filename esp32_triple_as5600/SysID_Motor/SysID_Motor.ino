@@ -40,6 +40,14 @@ const uint8_t  PIN_LPWM      = 26;
 const uint32_t PWM_FREQ_HZ   = 20000;
 const uint8_t  PWM_RES_BITS  = 8;
 
+// RPWM/LPWM de los OTROS DOS BTS7960 (Motor 2 y Motor 3), que este sketch
+// no usa. Si se dejan todo conectado (recomendado por comodidad en vez de
+// desarmar el cableado 3 veces), estos pines quedarian flotando - y como
+// R_EN/L_EN de esos drivers estan permanentemente habilitados, un pin
+// flotante podria interpretarse como ruido y mover esos motores solos.
+// Se fuerzan a LOW explicitamente para evitarlo.
+const uint8_t PINES_OTROS_DRIVERS[4] = {27, 18, 19, 23};
+
 // ---------------- Parametros del experimento (ajustables) ----------------
 const uint32_t TS_MS             = 10;    // periodo de muestreo: 10 ms (100 Hz)
 const uint32_t DURACION_TOTAL_MS = 20000; // ~20 segundos totales de prueba
@@ -104,6 +112,13 @@ void setup() {
 
   configurarPWM();
   escribirDuty(0);
+
+  // Deja en LOW los pines de los otros dos drivers, por si se dejaron
+  // conectados (ver comentario junto a PINES_OTROS_DRIVERS mas arriba).
+  for (uint8_t i = 0; i < 4; i++) {
+    pinMode(PINES_OTROS_DRIVERS[i], OUTPUT);
+    digitalWrite(PINES_OTROS_DRIVERS[i], LOW);
+  }
 
   Serial.println();
   Serial.print("Duracion: ");

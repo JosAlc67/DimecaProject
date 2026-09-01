@@ -182,29 +182,62 @@ bool leerAS5600_3(uint16_t &raw, bool &imanOk) {
 // de 4096), asume que se cruzo la frontera 0/4095 y suma o resta una
 // vuelta completa segun el sentido.
 
-int32_t posicionAcum3   = 0;
-int16_t ultimaPosicion3 = 0;
-bool    primeraLectura3 = true;
+int32_t  posicionAcum3        = 0;
+int16_t  ultimaPosicion3      = 0;
+bool     primeraLectura3      = true;
+uint32_t tiempoUltimaLectura3 = 0;
+
+// Cota de velocidad fisicamente plausible del eje, con margen holgado
+// sobre lo medido en CALVEL/PID a duty maximo (unas decenas de deg/s).
+// Se usa SOLO para filtrar lecturas corruptas del bus #3: a diferencia
+// de #1/#2 (I2C por hardware), el #3 es bit-banged por software, sin CRC
+// ni filtro de glitches, y mucho mas sensible al ruido electrico que
+// meten los BTS7960 al conmutar PWM cerca del cable. Una sola lectura
+// corrupta que "parezca" un salto de mas de media vuelta se tomaba antes
+// como una vuelta completa real (+-4096 cuentas, +-360 grados) de golpe,
+// corrompiendo el acumulado permanentemente - eso es lo que producia el
+// desfase de decenas de grados visto en las pruebas con Motor 3, peor
+// mientras mas rapido/largo giraba (mas lecturas por I2C software en
+// ese tramo = mas chance de que alguna saliera corrupta).
+const float VELOCIDAD_MAX_PLAUSIBLE_DEG_S = 150.0f;
 
 bool actualizarPosicion3() {
   uint16_t raw;
   if (!leerAnguloConOffset_bus3(raw)) return false;
   int16_t value = (int16_t)raw;
 
+  uint32_t ahora = micros();
+
   if (primeraLectura3) {
     ultimaPosicion3 = value;
+    tiempoUltimaLectura3 = ahora;
     primeraLectura3 = false;
     return true;
   }
 
+  int32_t deltaBruto;
   if ((ultimaPosicion3 > 2048) && (value < (ultimaPosicion3 - 2048))) {
-    posicionAcum3 = posicionAcum3 + 4096 - ultimaPosicion3 + value;      // vuelta completa CW
+    deltaBruto = 4096 - ultimaPosicion3 + value;      // vuelta completa CW
   } else if ((value > 2048) && (ultimaPosicion3 < (value - 2048))) {
-    posicionAcum3 = posicionAcum3 - 4096 - ultimaPosicion3 + value;      // vuelta completa CCW
+    deltaBruto = -4096 - ultimaPosicion3 + value;     // vuelta completa CCW
   } else {
-    posicionAcum3 = posicionAcum3 - ultimaPosicion3 + value;
+    deltaBruto = value - ultimaPosicion3;
   }
+
+  float dtSeg = (ahora - tiempoUltimaLectura3) / 1000000.0f;
+  float velocidadImplicada = fabs((float)deltaBruto) * (360.0f / 4096.0f) / max(dtSeg, 0.0001f);
+
+  if (velocidadImplicada > VELOCIDAD_MAX_PLAUSIBLE_DEG_S) {
+    // Lectura descartada: el salto implica una velocidad imposible para
+    // este motor, casi seguro ruido del bus. No se toca ultimaPosicion3
+    // ni posicionAcum3 (se reintenta con la siguiente lectura); comOk3
+    // sigue en true porque la transaccion I2C en si no fallo.
+    return true;
+  }
+
+  posicionAcum3 += deltaBruto;
   ultimaPosicion3 = value;
+  tiempoUltimaLectura3 = ahora;
   return true;
 }
 
@@ -221,6 +254,7 @@ void resetPosicionAcumulada3(int32_t nuevaPosicion) {
   uint16_t raw;
   leerAnguloConOffset_bus3(raw);
   ultimaPosicion3 = (int16_t)raw;
+  tiempoUltimaLectura3 = micros();
   posicionAcum3 = nuevaPosicion;
 }
 
@@ -675,10 +709,19 @@ const float    TOLERANCIA_HOMING_DEG     = 3.0f;   // se considera "en home" den
 const uint32_t HOMING_TIMEOUT_MS         = 20000;  // aborta si tarda mas de esto en total
 const uint32_t HOMING_MARGEN_PROGRESO_MS = 4000;   // debe mejorar el error en este tiempo
 
+// Cerca del setpoint se baja la velocidad: a velocidadMotor[m] (tipico
+// ~150) el motor sigue girando un poco por inercia despues de cortar el
+// PWM, y ese "coast" era buena parte del error final constante que se
+// veia en HOME. Con menos velocidad al final, menos inercia, menos
+// sobrepaso, y el resultado queda mas cerca de 0.
+const float    HOME_ZONA_LENTA_DEG       = 15.0f;
+const uint8_t  HOME_DUTY_LENTO           = DUTY_MIN_SEGURO; // 90: ya confirmado como piso seguro
+
 bool homingActivo[3]         = {false, false, false};
 uint32_t homingInicio[3]     = {0, 0, 0};
 uint32_t homingUltimoProgreso[3] = {0, 0, 0};
 float homingMejorError[3]    = {0, 0, 0};
+uint8_t homingDutyActual[3]  = {0, 0, 0};
 
 // Lee la posicion acumulada (continua, sin wraparound) en grados del
 // encoder correspondiente al motor `m` (0, 1 o 2).
@@ -696,6 +739,23 @@ bool leerAnguloAcumuladoGrados(uint8_t m, float &grados) {
   if (!ok) return false;
   grados = posRaw * (360.0f / 4096.0f);
   return true;
+}
+
+// Escribe PWM directo con sentido y duty elegidos, para HOME. A
+// diferencia de girarAdelante()/girarReversa() (que siempre usan
+// velocidadMotor[m] fijo), este permite bajar la velocidad cerca del
+// setpoint sin pasar por el guard de "debe estar PARADO" de esas
+// funciones - HOME ya controla el flujo por su cuenta.
+void homingMover(uint8_t m, bool adelante, uint8_t duty) {
+  if (adelante) {
+    escribirPWM(PIN_LPWM[m], canalLPWM(m), 0);
+    escribirPWM(PIN_RPWM[m], canalRPWM(m), duty);
+    estadoMotor[m] = ADELANTE;
+  } else {
+    escribirPWM(PIN_RPWM[m], canalRPWM(m), 0);
+    escribirPWM(PIN_LPWM[m], canalLPWM(m), duty);
+    estadoMotor[m] = REVERSA;
+  }
 }
 
 void detenerHoming(uint8_t m, const char *motivo) {
@@ -732,6 +792,7 @@ void iniciarHoming(uint8_t m) {
   homingInicio[m] = millis();
   homingUltimoProgreso[m] = millis();
   homingMejorError[m] = fabs(grados);
+  homingDutyActual[m] = 0;
   Serial.print("Motor ");
   Serial.print(m + 1);
   Serial.print(": iniciando HOME desde ");
@@ -778,11 +839,17 @@ void actualizarHoming(uint8_t m) {
   // Regla fija: negativo -> reversa (R, suma), positivo -> adelante (F, resta).
   bool debeIrAdelante = (grados > 0);
   EstadoMotor direccionDeseada = debeIrAdelante ? ADELANTE : REVERSA;
+  uint8_t dutyDeseado = (errorAbs <= HOME_ZONA_LENTA_DEG) ? HOME_DUTY_LENTO : velocidadMotor[m];
 
   if (estadoMotor[m] != direccionDeseada) {
     if (estadoMotor[m] != PARADO) detenerMotor(m);
-    if (debeIrAdelante) girarAdelante(m);
-    else girarReversa(m);
+    homingMover(m, debeIrAdelante, dutyDeseado);
+    homingDutyActual[m] = dutyDeseado;
+  } else if (dutyDeseado != homingDutyActual[m]) {
+    // Mismo sentido, solo se entra/sale de la zona lenta - no hace falta
+    // detenerse primero para esto.
+    homingMover(m, debeIrAdelante, dutyDeseado);
+    homingDutyActual[m] = dutyDeseado;
   }
 }
 

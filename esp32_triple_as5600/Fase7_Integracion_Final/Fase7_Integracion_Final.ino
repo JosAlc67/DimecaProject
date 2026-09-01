@@ -461,6 +461,39 @@ int32_t leerPosicionAcumRaw(uint8_t m) {
   }
 }
 
+// ---------------- Velocidad estimada en vivo (para STATUS) ----------------
+//
+// Velocidad actual (deg/s, con signo) de cada motor, para mostrar en
+// STATUS. Se recalcula sola en el fondo cada VELOCIDAD_ESTIMA_INTERVALO_MS
+// viendo cuanto se movio el acumulado de cada encoder en ese intervalo -
+// no importa si el motor esta en manual, HOME o PID, cualquier movimiento
+// real se refleja. Se pasa por un filtro exponencial (EMA) para no
+// mostrar puro ruido de cuantizacion del encoder (12 bits) de golpe.
+const uint32_t VELOCIDAD_ESTIMA_INTERVALO_MS = 200;
+const float    VELOCIDAD_EMA_ALFA            = 0.3f; // 0-1: mas alto sigue mas rapido pero mas ruidoso
+
+int32_t  velPosAnterior[3]        = {0, 0, 0};
+uint32_t velTiempoAnterior        = 0;
+float    velocidadEstimadaDegS[3] = {0.0f, 0.0f, 0.0f};
+
+void actualizarVelocidadEstimada() {
+  uint32_t ahora = millis();
+  if (velTiempoAnterior != 0 && (ahora - velTiempoAnterior) < VELOCIDAD_ESTIMA_INTERVALO_MS) return;
+
+  if (velTiempoAnterior != 0) {
+    float dtSeg = (ahora - velTiempoAnterior) / 1000.0f;
+    for (uint8_t m = 0; m < 3; m++) {
+      int32_t posActual = leerPosicionAcumRaw(m);
+      float instantanea = (posActual - velPosAnterior[m]) * (360.0f / 4096.0f) / dtSeg;
+      velocidadEstimadaDegS[m] = VELOCIDAD_EMA_ALFA * instantanea + (1.0f - VELOCIDAD_EMA_ALFA) * velocidadEstimadaDegS[m];
+      velPosAnterior[m] = posActual;
+    }
+  } else {
+    for (uint8_t m = 0; m < 3; m++) velPosAnterior[m] = leerPosicionAcumRaw(m);
+  }
+  velTiempoAnterior = ahora;
+}
+
 // Guarda en flash la posicion acumulada actual del encoder del motor `m`,
 // para poder restaurarla en el proximo arranque (ver setup()).
 void guardarPosicionMotor(uint8_t m) {
@@ -1083,6 +1116,13 @@ void imprimirEstadoCompleto() {
   imprimirPosicion("AS5600 #2", comOk2, as5600_2.getCumulativePosition(false), as5600_2.getRevolutions(), imanOk2);
   imprimirPosicion("AS5600 #3", comOk3, posicionAcum3, revoluciones3(), imanOk3);
 
+  Serial.print("Velocidad actual (deg/s) -> M1: ");
+  Serial.print(velocidadEstimadaDegS[0], 2);
+  Serial.print(" | M2: ");
+  Serial.print(velocidadEstimadaDegS[1], 2);
+  Serial.print(" | M3: ");
+  Serial.println(velocidadEstimadaDegS[2], 2);
+
   for (uint8_t m = 0; m < 3; m++) {
     if (!pidActivo[m]) continue;
     float actual;
@@ -1245,7 +1285,7 @@ void setup() {
   Serial.println("Comandos: M1 M2 M3 (seleccionar motor) | F (adelante) | R (reversa) | S (detener) | SS (parada de emergencia)");
   Serial.println("Calibracion: CAL1 CAL2 CAL3 -> fija 0 deg en la posicion fisica actual de ese eje (persiste en flash)");
   Serial.println("HOME: HOME1 HOME2 HOME3 (un motor) | HOME (los 3 a la vez) -> regreso a 0 en lazo cerrado, sin PID");
-  Serial.println("STATUS -> imprime el angulo/vueltas de los 3 encoders (ya no se imprime solo, para no saturar el Monitor Serial)");
+  Serial.println("STATUS -> imprime el angulo/vueltas y la velocidad actual (deg/s) de los 3 encoders (ya no se imprime solo, para no saturar el Monitor Serial)");
   Serial.println("CALVEL -> mide y empareja la velocidad real de los 3 motores contra el mas lento (requiere los 3 detenidos, persiste en flash)");
   Serial.println("CALVEL M<1-3> <duty> -> igual, pero fija el motor indicado a ese duty y usa su velocidad como objetivo. Ej: CALVEL M3 225");
   Serial.println("SETVEL1/SETVEL2/SETVEL3 <duty> -> fija a mano el duty de ese motor (sin medir), persiste en flash. Ej: SETVEL2 122");
@@ -1263,6 +1303,7 @@ void loop() {
   }
 
   actualizarEncoders();
+  actualizarVelocidadEstimada();
 
   // Avanza el homing (si esta activo) de cada motor, tambien en cada
   // iteracion de loop() para reaccionar rapido si hay que abortar.

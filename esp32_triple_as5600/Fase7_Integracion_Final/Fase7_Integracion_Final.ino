@@ -1,7 +1,11 @@
-// Fase 7 - Integracion final: 3 AS5600 + 3 BTS7960, SIN PID todavia.
+// Fase 7 - Integracion final: 3 AS5600 + 3 BTS7960.
 // Lee los 3 encoders periodicamente y permite controlar los 3 motores
 // de forma independiente por comandos Serial, con la misma proteccion
-// de la Fase 6: no se permite invertir sentido sin pasar por parada.
+// de la Fase 6 para el modo manual (F/R/HOME): no se permite invertir
+// sentido sin pasar por parada. Ademas incluye PID real por motor
+// (comandos PID1/PID2/PID3, ver esa seccion mas abajo) con ganancias
+// obtenidas por el usuario en MATLAB a partir de las plantas
+// identificadas con SysID_Motor.ino.
 //
 // IMPORTANTE: la lectura de los 3 AS5600 es completamente independiente
 // de los motores y se puede probar ahora mismo. Los comandos de motor
@@ -360,6 +364,11 @@ enum EstadoMotor { PARADO, ADELANTE, REVERSA };
 EstadoMotor estadoMotor[3] = {PARADO, PARADO, PARADO};
 uint8_t motorActivo = 0;
 
+// Declarado aqui (no junto con el resto del PID mas abajo) porque
+// girarAdelante()/girarReversa()/iniciarHoming() necesitan consultarlo
+// para rechazar comandos manuales mientras el PID de ese motor este activo.
+bool pidActivo[3] = {false, false, false};
+
 void configurarPWM(uint8_t pin, uint8_t canal) {
 #if CORE_LEDC_V3
   ledcAttach(pin, PWM_FREQ_HZ, PWM_RES_BITS);
@@ -420,6 +429,10 @@ void detenerMotor(uint8_t m) {
 }
 
 void girarAdelante(uint8_t m) {
+  if (pidActivo[m]) {
+    Serial.println("RECHAZADO: PID activo en este motor, manda S primero.");
+    return;
+  }
   if (estadoMotor[m] != PARADO) {
     Serial.println("RECHAZADO: detén el motor (S) antes de cambiar de sentido.");
     return;
@@ -433,6 +446,10 @@ void girarAdelante(uint8_t m) {
 }
 
 void girarReversa(uint8_t m) {
+  if (pidActivo[m]) {
+    Serial.println("RECHAZADO: PID activo en este motor, manda S primero.");
+    return;
+  }
   if (estadoMotor[m] != PARADO) {
     Serial.println("RECHAZADO: detén el motor (S) antes de cambiar de sentido.");
     return;
@@ -691,6 +708,12 @@ void detenerHoming(uint8_t m, const char *motivo) {
 }
 
 void iniciarHoming(uint8_t m) {
+  if (pidActivo[m]) {
+    Serial.print("Motor ");
+    Serial.print(m + 1);
+    Serial.println(": RECHAZADO - PID activo en este motor, manda S primero.");
+    return;
+  }
   if (estadoMotor[m] != PARADO) {
     Serial.print("Motor ");
     Serial.print(m + 1);
@@ -763,6 +786,153 @@ void actualizarHoming(uint8_t m) {
   }
 }
 
+// ---------------- PID real por motor (identificado con System Identification Toolbox) ----------------
+//
+// Ganancias obtenidas por el usuario en MATLAB a partir de las plantas
+// identificadas con SysID_Motor.ino (una funcion de transferencia
+// posicion(deg)/duty por motor, ver esa carpeta). A diferencia de HOME
+// (bang-bang, velocidad fija, se detiene al llegar), este PID escribe un
+// duty CONTINUO y con signo, proporcional al error - no pasa por
+// girarAdelante()/girarReversa() ni por la maquina de estados de esas
+// funciones, porque un PID bien sintonizado cruza el cero de salida de
+// forma suave conforme se acerca al setpoint, sin el "cambio brusco de
+// sentido a velocidad fija" que esa maquina de estados esta pensada para
+// evitar en el modo manual/bang-bang.
+//
+// IMPORTANTE sobre el signo de Kp: las 3 ganancias son NEGATIVAS. Esto es
+// correcto, no un error de MATLAB: ya se confirmo en hardware (ver HOME)
+// que "adelante" (duty positivo) RESTA del acumulado y "reversa" SUMA -
+// es decir la planta identificada tiene ganancia negativa. Para que la
+// realimentacion sea efectivamente negativa (estabilizante), el
+// controlador necesita ganancia negativa tambien. Los signos coinciden
+// exactamente con lo que ya se sabia del hardware.
+//
+// Se dejan anotados los valores de P y PD por si se quieren probar en
+// vez del PID completo (bastaria con poner Ki=0 y/o Kd=0 en el arreglo).
+//
+// --- Motor 1 ---   P: Kp=-54.708699 | PD: Kp=-2.096146, Kd=0.000000
+// --- Motor 2 ---   P: Kp=-77.922487 | PD: Kp=-2.120143, Kd=0.000000
+// --- Motor 3 ---   P: Kp=-77.537923 | PD: Kp=-2.264696, Kd=0.000000
+
+struct GananciasPID { float Kp; float Ki; float Kd; };
+
+GananciasPID pidMotor[3] = {
+  {-2.080548f, -0.420325f, -0.165080f}, // Motor 1 (PID completo)
+  {-2.086742f, -0.374856f,  0.000000f}, // Motor 2 (PID completo; Kd=0 tal cual identificado)
+  {-2.249454f, -0.441603f, -0.179295f}  // Motor 3 (PID completo)
+};
+
+const uint32_t PID_INTERVALO_MS = 20;    // ciclo de control: 50 Hz
+const float    PID_SALIDA_MAX   = 255.0f; // mismas unidades (duty 0-255) que uso la identificacion
+
+float    pidSetpoint[3]      = {0, 0, 0}; // grados, en la misma escala continua "acumulado"
+float    pidIntegral[3]      = {0, 0, 0};
+float    pidErrorAnterior[3] = {0, 0, 0};
+uint32_t pidUltimoTiempo[3]  = {0, 0, 0};
+
+// Escribe un duty CON SIGNO en el motor `m`: positivo = adelante (RPWM),
+// negativo = reversa (LPWM), 0 = detenido. Bypassa girarAdelante()/
+// girarReversa() a proposito (ver nota arriba), pero si actualiza
+// estadoMotor[] para que STATUS y el resto del sistema lo reporten bien.
+void escribirComandoMotor(uint8_t m, float u) {
+  float magnitud = fabs(u);
+  if (magnitud > PID_SALIDA_MAX) magnitud = PID_SALIDA_MAX;
+  uint8_t duty = (uint8_t)magnitud;
+
+  if (u > 0.0f) {
+    escribirPWM(PIN_LPWM[m], canalLPWM(m), 0);
+    escribirPWM(PIN_RPWM[m], canalRPWM(m), duty);
+    estadoMotor[m] = ADELANTE;
+  } else if (u < 0.0f) {
+    escribirPWM(PIN_RPWM[m], canalRPWM(m), 0);
+    escribirPWM(PIN_LPWM[m], canalLPWM(m), duty);
+    estadoMotor[m] = REVERSA;
+  } else {
+    escribirPWM(PIN_RPWM[m], canalRPWM(m), 0);
+    escribirPWM(PIN_LPWM[m], canalLPWM(m), 0);
+    estadoMotor[m] = PARADO;
+  }
+}
+
+void iniciarPID(uint8_t m, float setpointDeg) {
+  if (homingActivo[m]) {
+    Serial.print("Motor ");
+    Serial.print(m + 1);
+    Serial.println(": RECHAZADO - HOME activo en este motor, manda S primero.");
+    return;
+  }
+  if (estadoMotor[m] != PARADO) {
+    Serial.print("Motor ");
+    Serial.print(m + 1);
+    Serial.println(": RECHAZADO - detenlo (S) antes de iniciar PID.");
+    return;
+  }
+  float actual;
+  if (!leerAnguloAcumuladoGrados(m, actual)) {
+    Serial.print("Motor ");
+    Serial.print(m + 1);
+    Serial.println(": RECHAZADO - encoder sin comunicacion, no se puede iniciar PID.");
+    return;
+  }
+  pidSetpoint[m]      = setpointDeg;
+  pidIntegral[m]      = 0.0f;
+  pidErrorAnterior[m] = setpointDeg - actual;
+  pidUltimoTiempo[m]  = millis();
+  pidActivo[m]        = true;
+  Serial.print("Motor ");
+  Serial.print(m + 1);
+  Serial.print(": PID activo, setpoint=");
+  Serial.print(setpointDeg, 2);
+  Serial.print(" deg (actual=");
+  Serial.print(actual, 2);
+  Serial.println(" deg)");
+}
+
+void detenerPID(uint8_t m) {
+  pidActivo[m] = false;
+  detenerMotor(m);
+}
+
+// Se llama en CADA iteracion de loop() para los motores con PID activo.
+// Internamente se autolimita a PID_INTERVALO_MS (no necesita otro control
+// de tiempo por fuera).
+void actualizarPID(uint8_t m) {
+  if (!pidActivo[m]) return;
+
+  uint32_t ahora = millis();
+  if (ahora - pidUltimoTiempo[m] < PID_INTERVALO_MS) return;
+  float dt = (ahora - pidUltimoTiempo[m]) / 1000.0f;
+  pidUltimoTiempo[m] = ahora;
+
+  float actual;
+  if (!leerAnguloAcumuladoGrados(m, actual)) {
+    Serial.print("Motor ");
+    Serial.print(m + 1);
+    Serial.println(": PID ABORTADO - se perdio comunicacion con el encoder.");
+    detenerPID(m);
+    return;
+  }
+
+  float error = pidSetpoint[m] - actual;
+  float integralTentativa = pidIntegral[m] + error * dt;
+  float derivada = (dt > 0.0f) ? (error - pidErrorAnterior[m]) / dt : 0.0f;
+
+  GananciasPID &g = pidMotor[m];
+  float salida = g.Kp * error + g.Ki * integralTentativa + g.Kd * derivada;
+
+  // Anti-windup simple: si la salida ya esta saturada, no sigue acumulando
+  // el termino integral (evita que el integrador se "infle" sin limite
+  // mientras el motor de todos modos no puede ir mas rapido).
+  if (salida > PID_SALIDA_MAX || salida < -PID_SALIDA_MAX) {
+    salida = constrain(salida, -PID_SALIDA_MAX, PID_SALIDA_MAX);
+  } else {
+    pidIntegral[m] = integralTentativa;
+  }
+
+  pidErrorAnterior[m] = error;
+  escribirComandoMotor(m, salida);
+}
+
 // Imprime el estado de los 3 encoders bajo demanda (comando STATUS), en vez
 // de hacerlo automaticamente cada cierto tiempo - eso generaba demasiado
 // ruido visual en el Monitor Serial.
@@ -775,6 +945,21 @@ void imprimirEstadoCompleto() {
   imprimirPosicion("AS5600 #1", comOk1, as5600_1.getCumulativePosition(false), as5600_1.getRevolutions(), imanOk1);
   imprimirPosicion("AS5600 #2", comOk2, as5600_2.getCumulativePosition(false), as5600_2.getRevolutions(), imanOk2);
   imprimirPosicion("AS5600 #3", comOk3, posicionAcum3, revoluciones3(), imanOk3);
+
+  for (uint8_t m = 0; m < 3; m++) {
+    if (!pidActivo[m]) continue;
+    float actual;
+    leerAnguloAcumuladoGrados(m, actual);
+    Serial.print("Motor ");
+    Serial.print(m + 1);
+    Serial.print(": PID activo | setpoint=");
+    Serial.print(pidSetpoint[m], 2);
+    Serial.print(" deg | actual=");
+    Serial.print(actual, 2);
+    Serial.print(" deg | error=");
+    Serial.print(pidSetpoint[m] - actual, 2);
+    Serial.println(" deg");
+  }
   Serial.println("---");
 }
 
@@ -787,9 +972,9 @@ void procesarComando(String cmd) {
   else if (cmd == "M3") { motorActivo = 2; Serial.println("Motor activo: 3"); }
   else if (cmd == "F") girarAdelante(motorActivo);
   else if (cmd == "R") girarReversa(motorActivo);
-  else if (cmd == "S") { homingActivo[motorActivo] = false; detenerMotor(motorActivo); }
+  else if (cmd == "S") { homingActivo[motorActivo] = false; pidActivo[motorActivo] = false; detenerMotor(motorActivo); }
   else if (cmd == "SS") {
-    for (uint8_t i = 0; i < 3; i++) { homingActivo[i] = false; detenerMotor(i); }
+    for (uint8_t i = 0; i < 3; i++) { homingActivo[i] = false; pidActivo[i] = false; detenerMotor(i); }
     Serial.println("PARADA DE EMERGENCIA: los 3 motores detenidos.");
   }
   else if (cmd == "CAL1") calibrarSensor(1);
@@ -827,8 +1012,11 @@ void procesarComando(String cmd) {
       Serial.println("Formato invalido. Usa: CALVEL M<1-3> <duty 0-255>. Ejemplo: CALVEL M3 225");
     }
   }
+  else if (cmd.startsWith("PID1 ")) iniciarPID(0, cmd.substring(5).toFloat());
+  else if (cmd.startsWith("PID2 ")) iniciarPID(1, cmd.substring(5).toFloat());
+  else if (cmd.startsWith("PID3 ")) iniciarPID(2, cmd.substring(5).toFloat());
   else if (cmd.length() > 0) {
-    Serial.println("Comando no reconocido. Usa: M1 M2 M3 F R S SS CAL1 CAL2 CAL3 HOME1 HOME2 HOME3 HOME STATUS CALVEL CALVEL M<1-3> <duty>");
+    Serial.println("Comando no reconocido. Usa: M1 M2 M3 F R S SS CAL1 CAL2 CAL3 HOME1 HOME2 HOME3 HOME STATUS CALVEL CALVEL M<1-3> <duty> PID1/2/3 <setpoint_deg>");
   }
 }
 
@@ -841,7 +1029,7 @@ void setup() {
   Serial.begin(115200);
   delay(500);
   Serial.println();
-  Serial.println("=== Fase 7: integracion final (3 AS5600 + 3 BTS7960, sin PID) ===");
+  Serial.println("=== Fase 7: integracion final (3 AS5600 + 3 BTS7960 + PID identificado) ===");
 
   Wire.begin(21, 22);
   Wire.setClock(400000);
@@ -920,6 +1108,7 @@ void setup() {
   Serial.println("STATUS -> imprime el angulo/vueltas de los 3 encoders (ya no se imprime solo, para no saturar el Monitor Serial)");
   Serial.println("CALVEL -> mide y empareja la velocidad real de los 3 motores contra el mas lento (requiere los 3 detenidos, persiste en flash)");
   Serial.println("CALVEL M<1-3> <duty> -> igual, pero fija el motor indicado a ese duty y usa su velocidad como objetivo. Ej: CALVEL M3 225");
+  Serial.println("PID1/PID2/PID3 <setpoint_deg> -> activa el PID real (ganancias identificadas) en ese motor, con ese setpoint. Ej: PID2 45.0");
   Serial.println("Motor activo por defecto: 1.");
   Serial.println();
 
@@ -939,6 +1128,12 @@ void loop() {
   actualizarHoming(0);
   actualizarHoming(1);
   actualizarHoming(2);
+
+  // Avanza el PID (si esta activo) de cada motor. actualizarPID() se
+  // autolimita a PID_INTERVALO_MS, es seguro llamarla en cada iteracion.
+  actualizarPID(0);
+  actualizarPID(1);
+  actualizarPID(2);
 
   // Respaldo periodico en flash, por si el ESP32 pierde alimentacion
   // mientras un motor sigue en movimiento (detenerMotor() ya guarda al

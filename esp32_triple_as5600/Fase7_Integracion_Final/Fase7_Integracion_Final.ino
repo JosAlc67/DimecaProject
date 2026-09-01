@@ -818,7 +818,12 @@ struct GananciasPID { float Kp; float Ki; float Kd; };
 
 GananciasPID pidMotor[3] = {
   {-2.080548f, -0.420325f, -0.165080f}, // Motor 1 (PID completo)
-  {-2.086742f, -0.374856f,  0.000000f}, // Motor 2 (PID completo; Kd=0 tal cual identificado)
+  {-2.086742f, -0.374856f, -0.150000f}, // Motor 2 (Kd=0 tal cual identificado en MATLAB; se
+                                         // agrega -0.15 a mano como punto de partida SIN
+                                         // VALIDAR, tomando de referencia el Kd de Motor 1/3
+                                         // que tienen Kp/Ki similares. Sin derivativo el motor
+                                         // cabeceaba bastante antes de llegar al setpoint - el
+                                         // termino derivativo es justo el que amortigua eso.
   {-2.249454f, -0.441603f, -0.179295f}  // Motor 3 (PID completo)
 };
 

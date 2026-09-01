@@ -833,7 +833,7 @@ const float    PID_SALIDA_MAX   = 255.0f; // mismas unidades (duty 0-255) que us
 // VALIDAR EN HARDWARE TODAVIA (punto de partida entre 60 y 150): si el
 // motor sigue sin arrancar cerca del setpoint, subelo; si pica/vibra
 // demasiado, bajalo.
-const uint8_t  PID_DUTY_MIN_FRICCION = 100;
+const uint8_t  PID_DUTY_MIN_FRICCION = 80;
 
 // Dentro de esta banda alrededor del setpoint se considera "llegado": el
 // AS5600 ya tiene ~1.5 deg de error de linealidad propio, asi que perseguir

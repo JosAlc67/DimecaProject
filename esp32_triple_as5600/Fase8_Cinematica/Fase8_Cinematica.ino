@@ -1010,7 +1010,13 @@ void iniciarPID(uint8_t m, float setpointDeg) {
     Serial.println(": RECHAZADO - HOME activo en este motor, manda S primero.");
     return;
   }
-  if (estadoMotor[m] != PARADO) {
+  // El guard de "debe estar PARADO" tiene sentido para bang-bang (F/R/HOME:
+  // cambiar de sentido de golpe a velocidad fija es riesgoso), pero no para
+  // PID - redirigir un lazo cerrado que ya esta corriendo (pidActivo[m])
+  // hacia un setpoint nuevo es normal y seguro, el PID hace la transicion
+  // solo. Sin esta excepcion, BEND no podia retargetear un motor que
+  // todavia estuviera convergiendo del BEND anterior.
+  if (estadoMotor[m] != PARADO && !pidActivo[m]) {
     Serial.print("Motor ");
     Serial.print(m + 1);
     Serial.println(": RECHAZADO - detenlo (S) antes de iniciar PID.");

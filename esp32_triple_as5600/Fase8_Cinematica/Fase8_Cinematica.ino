@@ -1,9 +1,11 @@
 // Fase 8 - Cinematica: parte de Fase 7 (3 AS5600 + 3 BTS7960 + PID real
 // por motor) y agrega una capa de traduccion arriba: el comando
-// BEND <theta_deg> <phi_deg> convierte un doblez deseado del segmento
-// (modelo PCC, 3 cables a 120 grados) en los 3 setpoints de PID
-// correspondientes, ver la seccion "Cinematica" mas abajo. Todo lo demas
-// (encoders, motores, HOME, PID individual) es identico a Fase 7.
+// BEND <theta_deg> <phi_deg> convierte un doblez deseado del tentaculo
+// COMPLETO (34cm, 21 segmentos pasivos, cuerpo conico) en los 3 setpoints
+// de PID correspondientes - modelo PCC, 3 tendones a 120 grados que corren
+// por dentro de los 21 segmentos y anclan solo en la punta, ver la seccion
+// "Cinematica" mas abajo. Todo lo demas (encoders, motores, HOME, PID
+// individual) es identico a Fase 7.
 //
 // IMPORTANTE: la lectura de los 3 AS5600 es completamente independiente
 // de los motores y se puede probar ahora mismo. Los comandos de motor
@@ -1123,8 +1125,22 @@ void actualizarPID(uint8_t m) {
 // jalan (no empujan) - por eso los 3 motores deben estar activos siempre,
 // ninguno puede quedar "libre".
 //
+// IMPORTANTE: el tentaculo NO es un cilindro de un solo segmento - es un
+// cuerpo conico de 21 segmentos pasivos (34 cm de largo total), y los 3
+// tendones corren por dentro de todos ellos anclando solo en la punta (el
+// segmento mas chico). O sea los 3 motores doblan el tentaculo COMPLETO
+// como un solo arco de curvatura constante (PCC), no solo el primer
+// segmento - los 21 segmentos son pasivos, no tienen motor propio.
+//
+// Como el radio del cable cambia a lo largo del cono (32mm en la base, ya
+// no es constante), la integral de deltaL a lo largo del arco para un cono
+// de conicidad LINEAL con curvatura constante se reduce, tras cancelarse
+// el largo total, a la MISMA formula de arriba pero usando el radio
+// PROMEDIO entre la base y la punta en vez de un radio de un solo punto:
+//   r_cable_efectivo = (r_base + r_punta) / 2 = (32 + 4.5) / 2 = 18.25 mm
+//
 // Constantes medidas por el usuario en el hardware real:
-const float R_CABLE_MM        = 1.0f;   // radio eje central -> anclaje de cada cable
+const float R_CABLE_MM        = 18.25f; // radio efectivo (promedio base/punta del cono, ver arriba)
 const float R_CARRETE_MM      = 12.0f;  // radio de carrete, igual en los 3 motores
 const float L_MAX_RECOGER_MM  = 110.0f; // 11 cm: maximo cable que se puede recoger con seguridad
 const float L_MAX_SOLTAR_MM   = 200.0f; // 20 cm: maximo cable que se puede soltar con seguridad
@@ -1134,16 +1150,6 @@ const float L_MAX_SOLTAR_MM   = 200.0f; // 20 cm: maximo cable que se puede solt
 // disposicion fisica real de los cables no es exactamente esta, este es el
 // unico lugar que hay que corregir.
 const float PHI_CABLE_DEG[3] = {0.0f, 120.0f, 240.0f};
-
-// NOTA sobre R_CABLE_MM=1mm: con este radio, el cambio de longitud de cable
-// por grado de theta es muy chico (para theta=90 deg, deltaL maximo es
-// apenas ~1.6mm) - o sea el rango de setpoints de motor que produce esto es
-// pequeño en comparacion con lo que un PID individual (PIDn) puede mover.
-// Vale la pena confirmar visualmente en la prueba de los 4 casos cardinales
-// (ver el plan) que el doblez resultante es el esperado en magnitud - si se
-// siente demasiado chico para el theta pedido, la medida de R_CABLE_MM es
-// sospechosa de estar mal tomada (posible mm vs cm) y hay que re-verificarla
-// antes de seguir.
 
 // Calcula los 3 setpoints de motor (grados) para un doblez (theta, phi)
 // dados, dejando el resultado en setpoints[3]. Aplica los limites fisicos

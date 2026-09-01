@@ -201,9 +201,24 @@ uint32_t tiempoUltimaLectura3 = 0;
 // ese tramo = mas chance de que alguna saliera corrupta).
 const float VELOCIDAD_MAX_PLAUSIBLE_DEG_S = 150.0f;
 
+// La libreria oficial de RobTillaart (usada para #1/#2), ante un fallo I2C,
+// NO reporta error de inmediato: reutiliza internamente el ultimo angulo
+// bueno leido y sigue - un solo tropiezo transitorio del bus no interrumpe
+// nada. Replicamos ese mismo criterio de tolerancia aqui: solo despues de
+// varios fallos SEGUIDOS se reporta "sin comunicacion" de verdad. Sin esto,
+// un solo glitch transitorio del bus #3 (mas propenso a esto por ser
+// bit-banged por software) abortaba de golpe un PID o HOME activo en Motor
+// 3, aunque el sensor siguiera funcionando bien el ciclo siguiente.
+uint8_t fallosConsecutivos3 = 0;
+const uint8_t MAX_FALLOS_CONSECUTIVOS_BUS3 = 5;
+
 bool actualizarPosicion3() {
   uint16_t raw;
-  if (!leerAnguloConOffset_bus3(raw)) return false;
+  if (!leerAnguloConOffset_bus3(raw)) {
+    fallosConsecutivos3++;
+    return (fallosConsecutivos3 < MAX_FALLOS_CONSECUTIVOS_BUS3);
+  }
+  fallosConsecutivos3 = 0;
   int16_t value = (int16_t)raw;
 
   uint32_t ahora = micros();

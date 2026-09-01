@@ -825,6 +825,23 @@ GananciasPID pidMotor[3] = {
 const uint32_t PID_INTERVALO_MS = 20;    // ciclo de control: 50 Hz
 const float    PID_SALIDA_MAX   = 255.0f; // mismas unidades (duty 0-255) que uso la identificacion
 
+// Piso de friccion estatica: en Fase 6 se confirmo que duty=60 (~23%) NO
+// alcanza a arrancar estos motores, y duty=150 (~59%) si. Sin este piso, al
+// achicarse el error el PID pide una salida chica que nunca mueve el motor
+// - se queda "pegado" esperando a que el integral se infle solo, que es
+// justo el error lento y persistente que se vio en las pruebas. VALOR SIN
+// VALIDAR EN HARDWARE TODAVIA (punto de partida entre 60 y 150): si el
+// motor sigue sin arrancar cerca del setpoint, subelo; si pica/vibra
+// demasiado, bajalo.
+const uint8_t  PID_DUTY_MIN_FRICCION = 100;
+
+// Dentro de esta banda alrededor del setpoint se considera "llegado": el
+// AS5600 ya tiene ~1.5 deg de error de linealidad propio, asi que perseguir
+// un error menor que eso es perseguir ruido del sensor, no error real - y
+// con el piso de friccion de arriba, insistir ahi solo logra que el motor
+// pique sin asentarse nunca.
+const float    PID_ZONA_MUERTA_DEG = 1.5f;
+
 float    pidSetpoint[3]      = {0, 0, 0}; // grados, en la misma escala continua "acumulado"
 float    pidIntegral[3]      = {0, 0, 0};
 float    pidErrorAnterior[3] = {0, 0, 0};
@@ -914,6 +931,16 @@ void actualizarPID(uint8_t m) {
   }
 
   float error = pidSetpoint[m] - actual;
+
+  if (fabs(error) <= PID_ZONA_MUERTA_DEG) {
+    // Ya llegamos (dentro del margen de ruido del sensor): no seguir
+    // forzando el motor contra su propia friccion estatica por una
+    // fraccion de grado que ademas no se puede medir con certeza.
+    pidErrorAnterior[m] = error;
+    escribirComandoMotor(m, 0.0f);
+    return;
+  }
+
   float integralTentativa = pidIntegral[m] + error * dt;
   float derivada = (dt > 0.0f) ? (error - pidErrorAnterior[m]) / dt : 0.0f;
 
@@ -927,6 +954,15 @@ void actualizarPID(uint8_t m) {
     salida = constrain(salida, -PID_SALIDA_MAX, PID_SALIDA_MAX);
   } else {
     pidIntegral[m] = integralTentativa;
+  }
+
+  // Piso de friccion: si el PID pide movimiento pero por debajo del duty
+  // que vence la friccion estatica, subirlo a ese piso (conservando el
+  // signo) - si no, el motor nunca arranca cerca del setpoint.
+  if (salida > 0.0f && salida < (float)PID_DUTY_MIN_FRICCION) {
+    salida = (float)PID_DUTY_MIN_FRICCION;
+  } else if (salida < 0.0f && salida > -(float)PID_DUTY_MIN_FRICCION) {
+    salida = -(float)PID_DUTY_MIN_FRICCION;
   }
 
   pidErrorAnterior[m] = error;

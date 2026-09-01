@@ -688,6 +688,20 @@ void calibrarVelocidadesConReferencia(uint8_t motorRef, uint8_t dutyRef) {
   Serial.println("Calibracion con referencia terminada.");
 }
 
+// Fija el duty de un motor a mano (sin medir nada) y lo persiste en
+// flash, igual que CALVEL pero sin el paso de medicion automatica - para
+// cuando el ajuste de velocidad se calcula aparte a partir de datos ya
+// tomados (ver comando SETVEL<1-3> mas abajo).
+void fijarVelocidadMotor(uint8_t m, uint8_t duty) {
+  velocidadMotor[m] = duty;
+  guardarVelocidadMotor(m + 1, duty);
+  Serial.print("Motor ");
+  Serial.print(m + 1);
+  Serial.print(": duty fijado a mano en ");
+  Serial.print(duty);
+  Serial.println(" (guardado en flash).");
+}
+
 // ---------------- HOME (regreso a 0) - lazo cerrado simple, SIN PID ----------------
 //
 // Regla fija para los 3 motores, confirmada en hardware: F (adelante)
@@ -1123,8 +1137,11 @@ void procesarComando(String cmd) {
   else if (cmd.startsWith("PID1 ")) iniciarPID(0, cmd.substring(5).toFloat());
   else if (cmd.startsWith("PID2 ")) iniciarPID(1, cmd.substring(5).toFloat());
   else if (cmd.startsWith("PID3 ")) iniciarPID(2, cmd.substring(5).toFloat());
+  else if (cmd.startsWith("SETVEL1 ")) fijarVelocidadMotor(0, (uint8_t)constrain(cmd.substring(8).toInt(), 0, 255));
+  else if (cmd.startsWith("SETVEL2 ")) fijarVelocidadMotor(1, (uint8_t)constrain(cmd.substring(8).toInt(), 0, 255));
+  else if (cmd.startsWith("SETVEL3 ")) fijarVelocidadMotor(2, (uint8_t)constrain(cmd.substring(8).toInt(), 0, 255));
   else if (cmd.length() > 0) {
-    Serial.println("Comando no reconocido. Usa: M1 M2 M3 F R S SS CAL1 CAL2 CAL3 HOME1 HOME2 HOME3 HOME STATUS CALVEL CALVEL M<1-3> <duty> PID1/2/3 <setpoint_deg>");
+    Serial.println("Comando no reconocido. Usa: M1 M2 M3 F R S SS CAL1 CAL2 CAL3 HOME1 HOME2 HOME3 HOME STATUS CALVEL CALVEL M<1-3> <duty> SETVEL1/2/3 <duty> PID1/2/3 <setpoint_deg>");
   }
 }
 
@@ -1216,6 +1233,7 @@ void setup() {
   Serial.println("STATUS -> imprime el angulo/vueltas de los 3 encoders (ya no se imprime solo, para no saturar el Monitor Serial)");
   Serial.println("CALVEL -> mide y empareja la velocidad real de los 3 motores contra el mas lento (requiere los 3 detenidos, persiste en flash)");
   Serial.println("CALVEL M<1-3> <duty> -> igual, pero fija el motor indicado a ese duty y usa su velocidad como objetivo. Ej: CALVEL M3 225");
+  Serial.println("SETVEL1/SETVEL2/SETVEL3 <duty> -> fija a mano el duty de ese motor (sin medir), persiste en flash. Ej: SETVEL2 122");
   Serial.println("PID1/PID2/PID3 <setpoint_deg> -> activa el PID real (ganancias identificadas) en ese motor, con ese setpoint. Ej: PID2 45.0");
   Serial.println("Motor activo por defecto: 1.");
   Serial.println();

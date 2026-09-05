@@ -1320,6 +1320,16 @@ void actualizarGiro() {
   if (fabs(restante) <= GIRO_TOLERANCIA_DEG) {
     giroActivo = false;
     phiActualCmd = giroPhiDestino;
+
+    // iniciarPID() rechaza si estadoMotor[m] != PARADO y pidActivo[m] es
+    // falso - y aqui SIEMPRE es asi, porque escribirComandoMotor() (usado
+    // durante todo el giro) deja estadoMotor[m] en ADELANTE/REVERSA, no en
+    // PARADO. Sin este detenerMotor() previo, iniciarPID() se rechazaba en
+    // silencio para los 3 motores, y como nada mas escribia duty despues,
+    // los motores se quedaban girando indefinidamente al ultimo duty del
+    // giro - eso era la "fuga sin control" justo tras este mensaje.
+    for (uint8_t m = 0; m < 3; m++) detenerMotor(m);
+
     float setpoints[3];
     calcularSetpointsCinematica(giroThetaFijo, phiActualCmd, setpoints);
     for (uint8_t m = 0; m < 3; m++) iniciarPID(m, setpoints[m]);

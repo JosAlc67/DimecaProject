@@ -1204,6 +1204,15 @@ const float    GIRO_VELOCIDAD_DEG_S_DEFAULT = 15.0f; // velocidad angular por de
 const float    GIRO_TOLERANCIA_DEG          = 1.0f;
 const float    GIRO_DUTY_MIN_FRICCION       = 70.0f; // piso de arranque, mismo criterio que PID_DUTY_MIN_FRICCION
 
+// Ganancia de la correccion contra la posicion real del encoder (ver
+// actualizarGiro). Negativa por el mismo motivo que las ganancias del PID
+// normal (duty positivo resta del acumulado). Deliberadamente mas chica en
+// magnitud que el Kp del PID (~-2.08 a -2.25): aqui es solo un ajuste
+// fino sobre el feedforward, no el control principal - una ganancia tan
+// fuerte como la del PID pelearia contra el feedforward en vez de solo
+// corregirlo. Sin validar en hardware todavia.
+const float    GIRO_KP_CORRECCION           = -0.5f;
+
 // Diferencia angular con signo, en (-180, 180], tomando siempre el camino
 // mas corto de "desde" a "hasta" - evita que un giro de 350 grados se haga
 // dando toda la vuelta larga quedando del lado equivocado.
@@ -1323,14 +1332,38 @@ void actualizarGiro() {
   float dPhiDt_rad     = sentido * giroVelocidadDegS * (PI / 180.0f); // rad/s
   float phiActualRad   = phiActualCmd * (PI / 180.0f);
 
+  // Setpoints "de referencia" para este instante (mismo phi que lleva el
+  // software) - se usan SOLO para la correccion de abajo, no se le pasan
+  // a ningun PID mientras el giro esta activo.
+  float setpointsRef[3];
+  calcularSetpointsCinematica(giroThetaFijo, phiActualCmd, setpointsRef);
+
   for (uint8_t m = 0; m < 3; m++) {
     float phi_i_rad = PHI_CABLE_DEG[m] * (PI / 180.0f);
     // d(deltaL)/dt = theta_rad * r_cable * sin(phi - phi_i) * dphi/dt
     float dL_dt = thetaRad * R_CABLE_MM * sinf(phiActualRad - phi_i_rad) * dPhiDt_rad;
-    // grados de motor por segundo, luego a duty con el factor de CALVEL:
+    // grados de motor por segundo:
     float dThetaMotor_dt = (dL_dt / R_CARRETE_MM) * (180.0f / PI);
-    float duty = dThetaMotor_dt / K_DUTY_A_VELOCIDAD[m];
+    // Signo: en esta planta (confirmado en hardware, mismo criterio que
+    // usa el PID normal) duty positivo (adelante) RESTA del acumulado y
+    // duty negativo (reversa) SUMA - por eso el feedforward va con signo
+    // negativo aqui; sin este signo el motor gira al reves de lo que
+    // phiActualCmd asume, y el error crece sin freno en vez de cerrarse
+    // (la causa del "sube sin limite" en pruebas con theta/phi grandes).
+    float dutyFF = -dThetaMotor_dt / K_DUTY_A_VELOCIDAD[m];
 
+    // Correccion contra la posicion REAL del encoder (no solo el phi que
+    // lleva el software) - sin esto, cualquier imprecision del factor
+    // duty->velocidad (peor a duty alto, que es justo donde mas se nota
+    // con theta/phi grandes) se acumularia sin freno durante todo el giro.
+    float actual;
+    float dutyCorreccion = 0.0f;
+    if (leerAnguloAcumuladoGrados(m, actual)) {
+      float error = setpointsRef[m] - actual;
+      dutyCorreccion = GIRO_KP_CORRECCION * error; // mismo signo negativo que el PID normal
+    }
+
+    float duty = dutyFF + dutyCorreccion;
     if (duty > 0.0f && duty < GIRO_DUTY_MIN_FRICCION) duty = GIRO_DUTY_MIN_FRICCION;
     else if (duty < 0.0f && duty > -GIRO_DUTY_MIN_FRICCION) duty = -GIRO_DUTY_MIN_FRICCION;
     duty = constrain(duty, -255.0f, 255.0f);

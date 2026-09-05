@@ -4,12 +4,14 @@
 // COMPLETO (34cm, 21 segmentos pasivos, cuerpo conico) en los 3 setpoints
 // de PID correspondientes - modelo PCC, 3 tendones a 120 grados que corren
 // por dentro de los 21 segmentos y anclan solo en la punta, ver la seccion
-// "Cinematica" mas abajo. Ademas incluye TURN <phi_deg> [vel_deg_s], que
-// gira la direccion del doblez manteniendo theta fijo (giro conico, sin
-// pasar por apertura total) - pensado para reposicionar el tentaculo sin
-// soltar algo que tenga agarrado, a diferencia de BEND que salta directo
-// al setpoint final de cada motor sin trayectoria intermedia. Todo lo
-// demas (encoders, motores, HOME, PID individual) es identico a Fase 7.
+// "Cinematica" mas abajo. Ademas incluye TURN <theta_deg> <phi_deg>
+// [vel_deg_s], que gira la direccion del doblez manteniendo theta fijo -
+// a diferencia de BEND (que salta directo al setpoint final de posicion
+// de cada motor), TURN controla VELOCIDAD en lazo abierto (feedforward),
+// dando un giro conico continuo y suave en vez de reposicionamientos
+// discretos - pensado para no soltar algo que el tentaculo tenga agarrado
+// al cambiar de direccion. Todo lo demas (encoders, motores, HOME, PID
+// individual) es identico a Fase 7.
 //
 // IMPORTANTE: la lectura de los 3 AS5600 es completamente independiente
 // de los motores y se puede probar ahora mismo. Los comandos de motor
@@ -1054,22 +1056,6 @@ void detenerPID(uint8_t m) {
   detenerMotor(m);
 }
 
-// Cambia el setpoint de un PID YA activo sin reiniciar el integral ni el
-// historial derivativo (a diferencia de iniciarPID(), que resetea ambos a
-// proposito para una activacion nueva). Pensada para trayectorias que van
-// moviendo el setpoint en pasos chicos y seguidos (ver TURN/actualizarGiro)
-// - reiniciar el controlador en cada paso le quitaria la memoria integral
-// sin necesidad, ya que no es una activacion nueva, es la misma que sigue
-// una referencia que se mueve. Si el motor no tenia PID activo, se
-// comporta igual que iniciarPID() (primera activacion real).
-void actualizarSetpointPID(uint8_t m, float nuevoSetpoint) {
-  if (!pidActivo[m]) {
-    iniciarPID(m, nuevoSetpoint);
-    return;
-  }
-  pidSetpoint[m] = nuevoSetpoint;
-}
-
 // Se llama en CADA iteracion de loop() para los motores con PID activo.
 // Internamente se autolimita a PID_INTERVALO_MS (no necesita otro control
 // de tiempo por fuera).
@@ -1178,24 +1164,45 @@ const float PHI_CABLE_DEG[3] = {0.0f, 120.0f, 240.0f};
 float thetaActualCmd = 0.0f;
 float phiActualCmd   = 0.0f;
 
-// ---------------- TURN: giro angular a theta fijo (sin abrir el tentaculo) ----------------
+// ---------------- TURN: giro por control de VELOCIDAD (feedforward) ----------------
 //
-// BEND salta directo al setpoint final de cada motor - como cada motor
-// converge a su propio ritmo, cambiar de phi con BEND puede hacer que,
-// durante la transicion, la curvatura efectiva pase por debajo de la
-// deseada (el tentaculo se "abre" un poco sin que nadie lo haya pedido).
-// TURN evita esto: mantiene theta fijo y mueve phi en pasos chicos,
-// recalculando los 3 setpoints en cada paso - un giro conico continuo en
-// vez de un salto, para no soltar algo que el tentaculo tenga sujeto.
+// BEND salta directo al setpoint final de cada motor. La primera version
+// de TURN reescribia el setpoint de POSICION del PID cada 50ms en pasos
+// chicos, pero el PID de posicion tiene piso de friccion y zona muerta
+// pensados para asentarse en un punto FIJO, no para perseguir una
+// referencia en movimiento continuo - cada paso chico disparaba un
+// "tiron" nuevo del piso de friccion, sintiendose brusco/tropero.
+//
+// Esta version controla velocidad en lazo abierto (feedforward) en vez de
+// posicion: se deriva la formula de PCC respecto a phi para saber a que
+// velocidad angular debe girar cada motor en cada instante, se convierte
+// esa velocidad a duty con el factor deg/s-por-duty ya obtenido en CALVEL,
+// y se escribe ese duty directo (bypasseando el PID de posicion mientras
+// dura el giro). El resultado: mientras phi barre, cada motor acelera y
+// frena de forma continua segun sin(phi - phi_i) - los que deben soltar
+// cable y los que deben recogerlo cambian de forma suave, no a saltos: un
+// "tira y afloja" continuo entre los 3 en vez de reposicionamientos
+// discretos. Al llegar al destino, se apaga el lazo abierto y se entrega
+// el control al PID de posicion (mismo camino que BEND) para asentar con
+// precision en el punto final.
+
+// deg/s reales por unidad de duty, derivado de los resultados de CALVEL
+// (los 3 motores quedaron calibrados a ~55.22 deg/s en su duty corregido:
+// M1=139, M2=122, M3=135). Aproximacion lineal - ignora la no linealidad
+// de la friccion estatica en duties muy bajos, valida solo lejos de esa
+// zona (por eso el piso GIRO_DUTY_MIN_FRICCION de mas abajo).
+const float K_DUTY_A_VELOCIDAD[3] = {55.22f / 139.0f, 55.22f / 122.0f, 55.22f / 135.0f};
+
 bool     giroActivo        = false;
 float    giroThetaFijo     = 0.0f;
 float    giroPhiDestino    = 0.0f;
 float    giroVelocidadDegS = 0.0f;
 uint32_t giroUltimoTiempo  = 0;
 
-const uint32_t GIRO_INTERVALO_MS          = 50;   // 20 Hz: suave sin saturar el bus/loop
-const float    GIRO_VELOCIDAD_DEG_S_DEFAULT = 20.0f; // velocidad angular por defecto, sin validar en hardware
-const float    GIRO_TOLERANCIA_DEG        = 1.0f;
+const uint32_t GIRO_INTERVALO_MS            = 20;   // igual que el PID (50 Hz) - duty se siente continuo
+const float    GIRO_VELOCIDAD_DEG_S_DEFAULT = 15.0f; // velocidad angular por defecto, sin validar en hardware
+const float    GIRO_TOLERANCIA_DEG          = 1.0f;
+const float    GIRO_DUTY_MIN_FRICCION       = 70.0f; // piso de arranque, mismo criterio que PID_DUTY_MIN_FRICCION
 
 // Diferencia angular con signo, en (-180, 180], tomando siempre el camino
 // mas corto de "desde" a "hasta" - evita que un giro de 350 grados se haga
@@ -1251,16 +1258,28 @@ void iniciarCinematica(float theta_deg, float phi_deg) {
   for (uint8_t m = 0; m < 3; m++) iniciarPID(m, setpoints[m]);
 }
 
-// Comando TURN <phi_destino_deg> [velocidad_deg_s]: gira phi hacia
-// phi_destino_deg mantieniendo theta fijo en el ultimo valor comandado
-// (thetaActualCmd) - no acepta un theta nuevo a proposito, es solo para
-// rotar la direccion del doblez sin cambiar cuanto se ha cerrado.
-void iniciarGiro(float phiDestinoDeg, float velocidadDegS) {
-  giroThetaFijo     = thetaActualCmd;
+// Comando TURN <theta_deg> <phi_destino_deg> [velocidad_deg_s]: gira hacia
+// phi_destino_deg mantieniendo theta_deg fijo durante todo el giro (igual
+// convencion de argumentos que BEND: primero cuanto cerrar, despues hacia
+// donde). Apaga el PID de posicion de los 3 motores mientras dura el giro
+// - lo controla actualizarGiro() por duty directo (ver arriba el porque).
+void iniciarGiro(float thetaFijoDeg, float phiDestinoDeg, float velocidadDegS) {
+  if (homingActivo[0] || homingActivo[1] || homingActivo[2]) {
+    Serial.println("TURN: RECHAZADO - hay un HOME activo, manda S primero.");
+    return;
+  }
+
+  giroThetaFijo     = thetaFijoDeg;
   giroPhiDestino    = phiDestinoDeg;
   giroVelocidadDegS = (velocidadDegS > 0.0f) ? velocidadDegS : GIRO_VELOCIDAD_DEG_S_DEFAULT;
   giroUltimoTiempo  = millis();
   giroActivo        = true;
+  thetaActualCmd    = thetaFijoDeg;
+
+  // El PID de posicion se apaga mientras dura el giro - actualizarGiro()
+  // escribe duty directo (feedforward de velocidad), no setpoints de
+  // posicion. Se reactiva solo al llegar al destino, para asentar fino.
+  for (uint8_t m = 0; m < 3; m++) pidActivo[m] = false;
 
   Serial.print("TURN: girando de phi=");
   Serial.print(phiActualCmd, 2);
@@ -1273,10 +1292,12 @@ void iniciarGiro(float phiDestinoDeg, float velocidadDegS) {
   Serial.println(" deg/s.");
 }
 
-// Se llama en cada iteracion de loop(). Avanza phiActualCmd hacia
-// giroPhiDestino a velocidad constante, recalculando y reescribiendo los 3
-// setpoints en cada paso via actualizarSetpointPID() (NO iniciarPID(), para
-// no perder el integral/derivativo de cada motor en cada paso chico).
+// Se llama en cada iteracion de loop(). Mientras el giro esta activo,
+// calcula la velocidad angular que necesita cada motor en este instante
+// (derivada de la formula PCC respecto a phi) y escribe el duty
+// correspondiente directo - sin pasar por el PID de posicion. Al llegar al
+// destino, entrega el control al PID (mismo camino que BEND) para asentar
+// con precision en el punto final.
 void actualizarGiro() {
   if (!giroActivo) return;
 
@@ -1286,20 +1307,38 @@ void actualizarGiro() {
   giroUltimoTiempo = ahora;
 
   float restante = diferenciaAngularCorta(phiActualCmd, giroPhiDestino);
-  float paso = giroVelocidadDegS * dtSeg;
 
-  if (fabs(restante) <= GIRO_TOLERANCIA_DEG || paso >= fabs(restante)) {
-    phiActualCmd = giroPhiDestino;
+  if (fabs(restante) <= GIRO_TOLERANCIA_DEG) {
     giroActivo = false;
-  } else {
-    phiActualCmd += (restante > 0.0f) ? paso : -paso;
+    phiActualCmd = giroPhiDestino;
+    float setpoints[3];
+    calcularSetpointsCinematica(giroThetaFijo, phiActualCmd, setpoints);
+    for (uint8_t m = 0; m < 3; m++) iniciarPID(m, setpoints[m]);
+    Serial.println("TURN: giro completado, PID tomando el control para asentar.");
+    return;
   }
 
-  float setpoints[3];
-  calcularSetpointsCinematica(giroThetaFijo, phiActualCmd, setpoints);
-  for (uint8_t m = 0; m < 3; m++) actualizarSetpointPID(m, setpoints[m]);
+  float sentido       = (restante > 0.0f) ? 1.0f : -1.0f;
+  float thetaRad       = giroThetaFijo * (PI / 180.0f);
+  float dPhiDt_rad     = sentido * giroVelocidadDegS * (PI / 180.0f); // rad/s
+  float phiActualRad   = phiActualCmd * (PI / 180.0f);
 
-  if (!giroActivo) Serial.println("TURN: giro completado.");
+  for (uint8_t m = 0; m < 3; m++) {
+    float phi_i_rad = PHI_CABLE_DEG[m] * (PI / 180.0f);
+    // d(deltaL)/dt = theta_rad * r_cable * sin(phi - phi_i) * dphi/dt
+    float dL_dt = thetaRad * R_CABLE_MM * sinf(phiActualRad - phi_i_rad) * dPhiDt_rad;
+    // grados de motor por segundo, luego a duty con el factor de CALVEL:
+    float dThetaMotor_dt = (dL_dt / R_CARRETE_MM) * (180.0f / PI);
+    float duty = dThetaMotor_dt / K_DUTY_A_VELOCIDAD[m];
+
+    if (duty > 0.0f && duty < GIRO_DUTY_MIN_FRICCION) duty = GIRO_DUTY_MIN_FRICCION;
+    else if (duty < 0.0f && duty > -GIRO_DUTY_MIN_FRICCION) duty = -GIRO_DUTY_MIN_FRICCION;
+    duty = constrain(duty, -255.0f, 255.0f);
+
+    escribirComandoMotor(m, duty);
+  }
+
+  phiActualCmd += sentido * giroVelocidadDegS * dtSeg;
 }
 
 // Imprime el estado de los 3 encoders bajo demanda (comando STATUS), en vez
@@ -1409,21 +1448,30 @@ void procesarComando(String cmd) {
     }
   }
   else if (cmd.startsWith("TURN ")) {
-    // Formato: TURN <phi_destino_deg> [velocidad_deg_s]. Ejemplo: TURN 270  o  TURN 270 15
+    // Formato: TURN <theta_deg> <phi_destino_deg> [velocidad_deg_s].
+    // Ejemplo: TURN 45 270   o   TURN 45 270 15
     String resto = cmd.substring(5);
     resto.trim();
-    int espacio = resto.indexOf(' ');
-    float phiDestino, velocidad = 0.0f;
-    if (espacio > 0) {
-      phiDestino = resto.substring(0, espacio).toFloat();
-      velocidad = resto.substring(espacio + 1).toFloat();
+    int esp1 = resto.indexOf(' ');
+    if (esp1 > 0) {
+      float thetaDeg = resto.substring(0, esp1).toFloat();
+      String resto2 = resto.substring(esp1 + 1);
+      resto2.trim();
+      int esp2 = resto2.indexOf(' ');
+      float phiDestino, velocidad = 0.0f;
+      if (esp2 > 0) {
+        phiDestino = resto2.substring(0, esp2).toFloat();
+        velocidad = resto2.substring(esp2 + 1).toFloat();
+      } else {
+        phiDestino = resto2.toFloat();
+      }
+      iniciarGiro(thetaDeg, phiDestino, velocidad);
     } else {
-      phiDestino = resto.toFloat();
+      Serial.println("Formato invalido. Usa: TURN <theta_deg> <phi_deg> [vel_deg_s]. Ejemplo: TURN 45 270 15");
     }
-    iniciarGiro(phiDestino, velocidad);
   }
   else if (cmd.length() > 0) {
-    Serial.println("Comando no reconocido. Usa: M1 M2 M3 F R S SS CAL1 CAL2 CAL3 HOME1 HOME2 HOME3 HOME STATUS CALVEL CALVEL M<1-3> <duty> SETVEL1/2/3 <duty> PID1/2/3 <setpoint_deg> BEND <theta_deg> <phi_deg> TURN <phi_deg> [vel_deg_s]");
+    Serial.println("Comando no reconocido. Usa: M1 M2 M3 F R S SS CAL1 CAL2 CAL3 HOME1 HOME2 HOME3 HOME STATUS CALVEL CALVEL M<1-3> <duty> SETVEL1/2/3 <duty> PID1/2/3 <setpoint_deg> BEND <theta_deg> <phi_deg> TURN <theta_deg> <phi_deg> [vel_deg_s]");
   }
 }
 
@@ -1518,7 +1566,7 @@ void setup() {
   Serial.println("SETVEL1/SETVEL2/SETVEL3 <duty> -> fija a mano el duty de ese motor (sin medir), persiste en flash. Ej: SETVEL2 122");
   Serial.println("PID1/PID2/PID3 <setpoint_deg> -> activa el PID real (ganancias identificadas) en ese motor, con ese setpoint. Ej: PID2 45.0");
   Serial.println("BEND <theta_deg> <phi_deg> -> dobla el segmento theta grados hacia la direccion phi (modelo PCC, 3 cables a 120), activa el PID de los 3 motores. Ej: BEND 15 90");
-  Serial.println("TURN <phi_deg> [vel_deg_s] -> gira la direccion del doblez a phi_deg SIN cambiar theta (gira en cono, no pasa por apertura total - para reposicionar sin soltar lo que el tentaculo tenga agarrado). Ej: TURN 270 15");
+  Serial.println("TURN <theta_deg> <phi_deg> [vel_deg_s] -> gira la direccion del doblez a phi_deg manteniendo theta_deg fijo durante todo el giro (control de velocidad, no de posicion - un tiron continuo suave, no pasa por apertura total). Ej: TURN 45 270 15");
   Serial.println("Motor activo por defecto: 1.");
   Serial.println();
 

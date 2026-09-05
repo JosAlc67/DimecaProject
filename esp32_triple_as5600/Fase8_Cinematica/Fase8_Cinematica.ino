@@ -188,6 +188,13 @@ bool leerAS5600_3(uint16_t &raw, bool &imanOk) {
 // de 4096), asume que se cruzo la frontera 0/4095 y suma o resta una
 // vuelta completa segun el sentido.
 
+// Declarado aqui (no mas abajo, junto al resto del estado de motores) para
+// que actualizarPosicion3() pueda usarlo como referencia de que sentido se
+// esta pidiendo activamente ahora mismo - ver el chequeo de sentido en
+// actualizarPosicion3() un poco mas abajo.
+enum EstadoMotor { PARADO, ADELANTE, REVERSA };
+EstadoMotor estadoMotor[3] = {PARADO, PARADO, PARADO};
+
 int32_t  posicionAcum3        = 0;
 int16_t  ultimaPosicion3      = 0;
 bool     primeraLectura3      = true;
@@ -206,6 +213,13 @@ uint32_t tiempoUltimaLectura3 = 0;
 // mientras mas rapido/largo giraba (mas lecturas por I2C software en
 // ese tramo = mas chance de que alguna saliera corrupta).
 const float VELOCIDAD_MAX_PLAUSIBLE_DEG_S = 150.0f;
+
+// Margen chico de holgura mecanica/asentamiento tolerado antes de
+// considerar un delta "en contra del sentido pedido" como sospechoso
+// (ver el chequeo de sentido en actualizarPosicion3()). Un salto en
+// contra mayor a esto, mientras el motor esta siendo impulsado
+// activamente, es ruido de bus, no un movimiento real hacia atras.
+const float CONTRADICCION_SENTIDO_MIN_DEG = 1.5f;
 
 // La libreria oficial de RobTillaart (usada para #1/#2), ante un fallo I2C,
 // NO reporta error de inmediato: reutiliza internamente el ultimo angulo
@@ -255,6 +269,24 @@ bool actualizarPosicion3() {
     // sigue en true porque la transaccion I2C en si no fallo.
     return true;
   }
+
+  // Chequeo de sentido: ya se confirmo en hardware (ver PID/HOME) que,
+  // mientras el motor esta siendo impulsado activamente, ADELANTE
+  // siempre resta del acumulado y REVERSA siempre suma - nunca al reves.
+  // Un delta que va notoriamente en contra del sentido pedido en este
+  // mismo instante es, con mucha probabilidad, ruido del bus bit-banged
+  // (mas sensible a esto durante PWM activo que #1/#2, que son I2C por
+  // hardware) y no un movimiento real hacia atras. Sin este filtro, ese
+  // ruido de bajo grado (no lo bastante grande como para disparar el
+  // filtro de velocidad de arriba, pensado para saltos de media vuelta)
+  // corrompia el acumulado de a poco en la direccion contraria a la
+  // real - eso explicaba que HOME "al bajar" (ADELANTE, arrancando desde
+  // una posicion positiva) nunca detectara que ya habia llegado: el
+  // acumulado seguia subiendo aunque el motor si estuviera bajando de
+  // verdad.
+  float deltaGrados = deltaBruto * (360.0f / 4096.0f);
+  if (estadoMotor[2] == ADELANTE && deltaGrados >  CONTRADICCION_SENTIDO_MIN_DEG) return true;
+  if (estadoMotor[2] == REVERSA  && deltaGrados < -CONTRADICCION_SENTIDO_MIN_DEG) return true;
 
   posicionAcum3 += deltaBruto;
   ultimaPosicion3 = value;
@@ -415,8 +447,6 @@ const uint8_t CANAL_RPWM[3] = {0, 2, 4};
 const uint8_t CANAL_LPWM[3] = {1, 3, 5};
 #endif
 
-enum EstadoMotor { PARADO, ADELANTE, REVERSA };
-EstadoMotor estadoMotor[3] = {PARADO, PARADO, PARADO};
 uint8_t motorActivo = 0;
 
 // Declarado aqui (no junto con el resto del PID mas abajo) porque

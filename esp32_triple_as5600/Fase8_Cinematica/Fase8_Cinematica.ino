@@ -954,6 +954,32 @@ void actualizarHoming(uint8_t m) {
   EstadoMotor direccionDeseada = debeIrAdelante ? ADELANTE : REVERSA;
   uint8_t dutyDeseado = (errorAbs <= HOME_ZONA_LENTA_DEG) ? HOME_DUTY_LENTO : velocidadMotor[m];
 
+  // Traza temporal de diagnostico: F/R manuales mueven motor 3 de verdad y
+  // en el sentido correcto, pero HOME en motor 3 no logra registrar
+  // progreso y aborta - esto imprime cada ~300ms mientras un HOME esta
+  // activo para ver en vivo que esta pasando con grados/direccion/duty/
+  // estadoMotor real vs deseado. Quitar una vez encontrada la causa.
+  static uint32_t debugUltimoPrint[3] = {0, 0, 0};
+  if (millis() - debugUltimoPrint[m] > 300) {
+    debugUltimoPrint[m] = millis();
+    Serial.print("  [HOME-DEBUG] M");
+    Serial.print(m + 1);
+    Serial.print(": grados=");
+    Serial.print(grados, 2);
+    Serial.print(" errorAbs=");
+    Serial.print(errorAbs, 2);
+    Serial.print(" mejorError=");
+    Serial.print(homingMejorError[m], 2);
+    Serial.print(" dirDeseada=");
+    Serial.print(debeIrAdelante ? "ADELANTE" : "REVERSA");
+    Serial.print(" estadoActual=");
+    Serial.print(estadoMotor[m] == ADELANTE ? "ADELANTE" : (estadoMotor[m] == REVERSA ? "REVERSA" : "PARADO"));
+    Serial.print(" dutyDeseado=");
+    Serial.print(dutyDeseado);
+    Serial.print(" dutyActual=");
+    Serial.println(homingDutyActual[m]);
+  }
+
   if (estadoMotor[m] != direccionDeseada) {
     if (estadoMotor[m] != PARADO) detenerMotor(m);
     homingMover(m, debeIrAdelante, dutyDeseado);

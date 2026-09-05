@@ -1036,6 +1036,19 @@ bool limiteCableExcedido(uint8_t m, float u) {
   return false;
 }
 
+// Red de seguridad generica e independiente de la posicion rastreada:
+// si un motor se sostiene a duty casi maximo por mas de este tiempo sin
+// bajar, se corta. Motivo: la falla real de motor 3 (cable soltado por
+// completo, ver foto) ocurrio con limiteCableExcedido() YA implementado,
+// porque a duty saturado sostenido el filtro de plausibilidad del bus
+// I2C de ese motor (VELOCIDAD_MAX_PLAUSIBLE_DEG_S) empezo a descartar
+// tambien lecturas REALES de movimiento rapido, congelando la posicion
+// rastreada - eso deja ciegos tanto al PID como a limiteCableExcedido(),
+// que dependen de esa misma lectura. Este freno no mira la posicion en
+// absoluto, solo cuanto tiempo lleva el motor exigido al limite.
+const float    DUTY_SATURACION_UMBRAL   = 250.0f;
+const uint32_t TIEMPO_SATURACION_MAX_MS = 4000;
+
 // Escribe un duty CON SIGNO en el motor `m`: positivo = adelante (RPWM),
 // negativo = reversa (LPWM), 0 = detenido. Bypassa girarAdelante()/
 // girarReversa() a proposito (ver nota arriba), pero si actualiza
@@ -1045,6 +1058,28 @@ void escribirComandoMotor(uint8_t m, float u) {
 
   float magnitud = fabs(u);
   if (magnitud > PID_SALIDA_MAX) magnitud = PID_SALIDA_MAX;
+
+  static uint32_t inicioSaturacion[3] = {0, 0, 0};
+  static bool     saturado[3]         = {false, false, false};
+  uint32_t ahora = millis();
+  if (magnitud >= DUTY_SATURACION_UMBRAL) {
+    if (inicioSaturacion[m] == 0) {
+      inicioSaturacion[m] = ahora;
+    } else if (ahora - inicioSaturacion[m] > TIEMPO_SATURACION_MAX_MS) {
+      saturado[m] = true;
+    }
+  } else {
+    inicioSaturacion[m] = 0;
+    saturado[m] = false;
+  }
+  if (saturado[m]) {
+    magnitud = 0.0f;
+    u = 0.0f;
+    Serial.print("Motor ");
+    Serial.print(m + 1);
+    Serial.println(": ABORTADO - duty saturado sostenido demasiado tiempo (posible perdida de lectura de posicion). Requiere S/SS y revision fisica.");
+  }
+
   uint8_t duty = (uint8_t)magnitud;
 
   if (u > 0.0f) {
@@ -1293,11 +1328,31 @@ float diferenciaAngularCorta(float desde, float hasta) {
   return diff - 180.0f;
 }
 
+// Curvatura maxima con sentido fisico: 180 deg ya dobla el tentaculo en un
+// semicirculo completo (la punta apuntando de vuelta hacia la base) - mas
+// que eso no tiene sentido mecanico y empieza a enroscarse sobre si mismo.
+// SIN VALIDAR contra el rango mecanico real todavia, es un techo de
+// sentido comun mientras tanto: con R_CABLE_MM=18.25mm, el limite de
+// cable (L_MAX_RECOGER_MM/L_MAX_SOLTAR_MM) por si solo NO alcanza a
+// frenar valores de theta absurdos (hacen falta cientos de grados de
+// theta para siquiera acercarse a esos limites) - un theta de 300 deg
+// pasaba sin que nada lo detuviera, obligando al motor a sostenerse a
+// duty maximo por varios segundos seguidos y eso es lo que disparaba el
+// problema real: a esa velocidad sostenida, el filtro de plausibilidad
+// del bus 3 (pensado para descartar lecturas corruptas) empezaba a
+// descartar tambien lecturas REALES, congelando la posicion rastreada
+// mientras el motor seguia girando de verdad - dejando ciegos tanto al
+// PID como a la pared de seguridad de cable, que comparan contra esa
+// posicion ya desincronizada de la realidad.
+const float THETA_MAX_DEG = 180.0f;
+
 // Calcula los 3 setpoints de motor (grados) para un doblez (theta, phi)
 // dados, dejando el resultado en setpoints[3]. Aplica los limites fisicos
 // de cable (L_MAX_RECOGER_MM / L_MAX_SOLTAR_MM) por seguridad - si theta
 // pide mas cable del que hay margen, se recorta ahi (no se aborta).
 void calcularSetpointsCinematica(float theta_deg, float phi_deg, float setpoints[3]) {
+  theta_deg = constrain(theta_deg, -THETA_MAX_DEG, THETA_MAX_DEG);
+
   float theta_rad = theta_deg * (PI / 180.0f);
   float phi_rad = phi_deg * (PI / 180.0f);
 
@@ -1318,6 +1373,7 @@ void calcularSetpointsCinematica(float theta_deg, float phi_deg, float setpoints
 // ya rechaza individualmente con su propio mensaje.
 void iniciarCinematica(float theta_deg, float phi_deg) {
   giroActivo = false; // BEND es un salto directo al setpoint final, cancela cualquier TURN en curso
+  theta_deg = constrain(theta_deg, -THETA_MAX_DEG, THETA_MAX_DEG);
   thetaActualCmd = theta_deg;
   phiActualCmd   = phi_deg;
 
@@ -1348,6 +1404,16 @@ void iniciarGiro(float thetaFijoDeg, float phiDestinoDeg, float velocidadDegS) {
     Serial.println("TURN: RECHAZADO - hay un HOME activo, manda S primero.");
     return;
   }
+
+  // Se clampea aqui (no solo dentro de calcularSetpointsCinematica) para
+  // que TODO el comando TURN sea consistente con el mismo theta real:
+  // giroThetaFijo tambien alimenta directamente el feedforward de
+  // velocidad (mas abajo, en actualizarGiro), y si ese valor quedara sin
+  // clampear mientras el setpoint de posicion si se clampea, el
+  // feedforward calcularia velocidad para un theta que el motor nunca
+  // va a alcanzar de verdad - la misma clase de descoordinacion que
+  // causo el sobrepaso original.
+  thetaFijoDeg = constrain(thetaFijoDeg, -THETA_MAX_DEG, THETA_MAX_DEG);
 
   giroThetaFijo     = thetaFijoDeg;
   giroPhiDestino    = phiDestinoDeg;

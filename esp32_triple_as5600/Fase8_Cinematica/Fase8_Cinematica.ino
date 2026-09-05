@@ -525,6 +525,10 @@ void girarAdelante(uint8_t m) {
     Serial.println("RECHAZADO: detén el motor (S) antes de cambiar de sentido.");
     return;
   }
+  if (limiteCableExcedido(m, 1.0f)) {
+    Serial.println("RECHAZADO: este motor ya esta en su limite de cable seguro de ese lado (recoger).");
+    return;
+  }
   escribirPWM(PIN_LPWM[m], canalLPWM(m), 0);
   escribirPWM(PIN_RPWM[m], canalRPWM(m), velocidadMotor[m]);
   estadoMotor[m] = ADELANTE;
@@ -540,6 +544,10 @@ void girarReversa(uint8_t m) {
   }
   if (estadoMotor[m] != PARADO) {
     Serial.println("RECHAZADO: detén el motor (S) antes de cambiar de sentido.");
+    return;
+  }
+  if (limiteCableExcedido(m, -1.0f)) {
+    Serial.println("RECHAZADO: este motor ya esta en su limite de cable seguro de ese lado (soltar).");
     return;
   }
   escribirPWM(PIN_RPWM[m], canalRPWM(m), 0);
@@ -815,6 +823,13 @@ bool leerAnguloAcumuladoGrados(uint8_t m, float &grados) {
 // setpoint sin pasar por el guard de "debe estar PARADO" de esas
 // funciones - HOME ya controla el flujo por su cuenta.
 void homingMover(uint8_t m, bool adelante, uint8_t duty) {
+  // Igual que en escribirComandoMotor(): si el motor ya esta en su limite
+  // de cable seguro de ese lado, no lo dejes seguir - se llama cada tick,
+  // asi que aqui no se imprime nada (evita saturar el Monitor Serial); si
+  // esto bloquea a HOME el tiempo suficiente, el propio timeout de HOME
+  // ya lo aborta con su mensaje normal.
+  if (limiteCableExcedido(m, adelante ? 1.0f : -1.0f)) duty = 0;
+
   if (adelante) {
     escribirPWM(PIN_LPWM[m], canalLPWM(m), 0);
     escribirPWM(PIN_RPWM[m], canalRPWM(m), duty);
@@ -987,11 +1002,47 @@ float    pidIntegral[3]      = {0, 0, 0};
 float    pidErrorAnterior[3] = {0, 0, 0};
 uint32_t pidUltimoTiempo[3]  = {0, 0, 0};
 
+// Limites fisicos de cable, medidos por el usuario: cuanto se puede
+// recoger/soltar con seguridad antes de quedarse sin cable o de que el
+// carrete empiece a enrollar para el lado contrario. Radio del carrete,
+// igual en los 3 motores.
+const float R_CARRETE_MM      = 12.0f;
+const float L_MAX_RECOGER_MM  = 110.0f; // 11 cm
+const float L_MAX_SOLTAR_MM   = 200.0f; // 20 cm
+
+// Bloqueo de seguridad REAL por motor: convierte la posicion acumulada
+// ACTUAL de ese motor (no un setpoint calculado, la lectura real del
+// encoder) a su equivalente en mm de cable, y compara contra los limites
+// de arriba. Antes, L_MAX_RECOGER_MM/L_MAX_SOLTAR_MM solo se usaban para
+// recortar el SETPOINT calculado en calcularSetpointsCinematica() - eso
+// no evitaba que el motor se PASARA de ese limite durante un sobrepaso
+// transitorio (visto en pruebas de TURN con angulos grandes: el motor 3
+// llegaba a recoger cuerda mas alla de lo que existe fisicamente,
+// enrollandola al reves). Esta funcion es la contraparte real: se llama
+// desde escribirComandoMotor() (el unico punto por donde pasa cualquier
+// duty, sin importar si lo pide el PID, TURN, HOME o el modo manual), y
+// si el motor ya esta en el limite, rechaza cualquier duty que lo empuje
+// mas alla - solo deja moverse de vuelta hacia el lado seguro.
+bool limiteCableExcedido(uint8_t m, float u) {
+  float actualDeg;
+  if (!leerAnguloAcumuladoGrados(m, actualDeg)) return false; // sin lectura: no se puede verificar, no bloquea
+
+  float L_actual_mm = actualDeg * (PI / 180.0f) * R_CARRETE_MM;
+
+  // u > 0 (adelante) RESTA del acumulado -> reduce L_actual_mm (mas
+  // recoger). u < 0 (reversa) SUMA -> aumenta L_actual_mm (mas soltar).
+  if (L_actual_mm <= -L_MAX_RECOGER_MM && u > 0.0f) return true;
+  if (L_actual_mm >=  L_MAX_SOLTAR_MM  && u < 0.0f) return true;
+  return false;
+}
+
 // Escribe un duty CON SIGNO en el motor `m`: positivo = adelante (RPWM),
 // negativo = reversa (LPWM), 0 = detenido. Bypassa girarAdelante()/
 // girarReversa() a proposito (ver nota arriba), pero si actualiza
 // estadoMotor[] para que STATUS y el resto del sistema lo reporten bien.
 void escribirComandoMotor(uint8_t m, float u) {
+  if (limiteCableExcedido(m, u)) u = 0.0f;
+
   float magnitud = fabs(u);
   if (magnitud > PID_SALIDA_MAX) magnitud = PID_SALIDA_MAX;
   uint8_t duty = (uint8_t)magnitud;
@@ -1145,11 +1196,11 @@ void actualizarPID(uint8_t m) {
 // PROMEDIO entre la base y la punta en vez de un radio de un solo punto:
 //   r_cable_efectivo = (r_base + r_punta) / 2 = (32 + 4.5) / 2 = 18.25 mm
 //
-// Constantes medidas por el usuario en el hardware real:
+// Constante medida por el usuario en el hardware real. R_CARRETE_MM,
+// L_MAX_RECOGER_MM y L_MAX_SOLTAR_MM se declaran mas arriba, junto a
+// escribirComandoMotor() - las necesita ahi el bloqueo de seguridad por
+// posicion real (ver ese comentario para el porque).
 const float R_CABLE_MM        = 18.25f; // radio efectivo (promedio base/punta del cono, ver arriba)
-const float R_CARRETE_MM      = 12.0f;  // radio de carrete, igual en los 3 motores
-const float L_MAX_RECOGER_MM  = 110.0f; // 11 cm: maximo cable que se puede recoger con seguridad
-const float L_MAX_SOLTAR_MM   = 200.0f; // 20 cm: maximo cable que se puede soltar con seguridad
 
 // Posicion angular de cada cable (grados), asumiendo Motor 1/2/3 a 0/120/240
 // - coincide con el mapeo motor<->encoder 1-1,2-2,3-3 ya confirmado. Si la

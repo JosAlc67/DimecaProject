@@ -1198,11 +1198,31 @@ float    giroThetaFijo     = 0.0f;
 float    giroPhiDestino    = 0.0f;
 float    giroVelocidadDegS = 0.0f;
 uint32_t giroUltimoTiempo  = 0;
+bool     giroEsperandoAsentar = false; // true: phi de software ya llego, esperando a que los motores reales confirmen
+uint32_t giroTiempoEspera     = 0;
 
 const uint32_t GIRO_INTERVALO_MS            = 20;   // igual que el PID (50 Hz) - duty se siente continuo
 const float    GIRO_VELOCIDAD_DEG_S_DEFAULT = 15.0f; // velocidad angular por defecto, sin validar en hardware
 const float    GIRO_TOLERANCIA_DEG          = 1.0f;
 const float    GIRO_DUTY_MIN_FRICCION       = 70.0f; // piso de arranque, mismo criterio que PID_DUTY_MIN_FRICCION
+
+// Frena antes de llegar (menos inercia/coast, menos sobrepaso), mismo
+// criterio que ya se uso para HOME.
+const float    GIRO_ZONA_LENTA_DEG          = 20.0f;
+const float    GIRO_VELOCIDAD_MINIMA_DEG_S  = 3.0f;
+
+// Antes de entregarle el control al PID (ganancia ~-2.08 a -2.25, mucho
+// mas fuerte que la correccion suave de aca arriba), hay que confirmar
+// que los 3 motores REALES ya estan cerca del setpoint final - no solo
+// que el phi de software llego. Entregar el control con un error real
+// todavia grande es lo que generaba el sobrepaso grande reportado en
+// pruebas: el salto de "correccion suave" a "PID a toda ganancia" con
+// varios grados de error de por medio es un golpe fuerte de una.
+const float    GIRO_TOLERANCIA_POSICION_DEG = 2.0f;
+// Salvavidas: si por lo que sea nunca converge exactamente dentro de
+// GIRO_TOLERANCIA_POSICION_DEG (p.ej. quedo justo en el borde y oscila
+// ahi por el piso de friccion), no se queda esperando para siempre.
+const uint32_t GIRO_TIMEOUT_ASENTADO_MS     = 3000;
 
 // Ganancia de la correccion contra la posicion real del encoder (ver
 // actualizarGiro). Negativa por el mismo motivo que las ganancias del PID
@@ -1283,6 +1303,7 @@ void iniciarGiro(float thetaFijoDeg, float phiDestinoDeg, float velocidadDegS) {
   giroVelocidadDegS = (velocidadDegS > 0.0f) ? velocidadDegS : GIRO_VELOCIDAD_DEG_S_DEFAULT;
   giroUltimoTiempo  = millis();
   giroActivo        = true;
+  giroEsperandoAsentar = false;
   thetaActualCmd    = thetaFijoDeg;
 
   // El PID de posicion se apaga mientras dura el giro - actualizarGiro()
@@ -1316,37 +1337,72 @@ void actualizarGiro() {
   giroUltimoTiempo = ahora;
 
   float restante = diferenciaAngularCorta(phiActualCmd, giroPhiDestino);
+  bool  phiCerca  = fabs(restante) <= GIRO_TOLERANCIA_DEG;
 
-  if (fabs(restante) <= GIRO_TOLERANCIA_DEG) {
-    giroActivo = false;
-    phiActualCmd = giroPhiDestino;
+  // El phi de software ya llego (o esta a punto): a partir de aqui deja
+  // de avanzar, se congela en el destino final. Todavia no se le entrega
+  // el control al PID - primero hay que confirmar que los 3 motores
+  // REALES tambien llegaron (ver el bloque de abajo).
+  float phiObjetivoInstante = phiCerca ? giroPhiDestino : phiActualCmd;
 
-    // iniciarPID() rechaza si estadoMotor[m] != PARADO y pidActivo[m] es
-    // falso - y aqui SIEMPRE es asi, porque escribirComandoMotor() (usado
-    // durante todo el giro) deja estadoMotor[m] en ADELANTE/REVERSA, no en
-    // PARADO. Sin este detenerMotor() previo, iniciarPID() se rechazaba en
-    // silencio para los 3 motores, y como nada mas escribia duty despues,
-    // los motores se quedaban girando indefinidamente al ultimo duty del
-    // giro - eso era la "fuga sin control" justo tras este mensaje.
-    for (uint8_t m = 0; m < 3; m++) detenerMotor(m);
+  float setpointsRef[3];
+  calcularSetpointsCinematica(giroThetaFijo, phiObjetivoInstante, setpointsRef);
 
-    float setpoints[3];
-    calcularSetpointsCinematica(giroThetaFijo, phiActualCmd, setpoints);
-    for (uint8_t m = 0; m < 3; m++) iniciarPID(m, setpoints[m]);
-    Serial.println("TURN: giro completado, PID tomando el control para asentar.");
-    return;
+  if (phiCerca) {
+    if (!giroEsperandoAsentar) {
+      giroEsperandoAsentar = true;
+      giroTiempoEspera = ahora;
+    }
+
+    bool listos = true;
+    for (uint8_t m = 0; m < 3; m++) {
+      float actual;
+      if (leerAnguloAcumuladoGrados(m, actual) && fabs(setpointsRef[m] - actual) > GIRO_TOLERANCIA_POSICION_DEG) {
+        listos = false;
+      }
+    }
+    bool seVencioElTiempo = (ahora - giroTiempoEspera) > GIRO_TIMEOUT_ASENTADO_MS;
+
+    if (listos || seVencioElTiempo) {
+      giroActivo = false;
+      phiActualCmd = giroPhiDestino;
+
+      // iniciarPID() rechaza si estadoMotor[m] != PARADO y pidActivo[m]
+      // es falso - y aqui SIEMPRE es asi, porque escribirComandoMotor()
+      // (usado durante todo el giro) deja estadoMotor[m] en
+      // ADELANTE/REVERSA, no en PARADO.
+      for (uint8_t m = 0; m < 3; m++) detenerMotor(m);
+      for (uint8_t m = 0; m < 3; m++) iniciarPID(m, setpointsRef[m]);
+
+      if (seVencioElTiempo && !listos) {
+        Serial.println("TURN: giro completado (tiempo de espera agotado, no todos los motores confirmaron), PID tomando el control.");
+      } else {
+        Serial.println("TURN: giro completado, PID tomando el control para asentar.");
+      }
+      return;
+    }
+    // Si no estan listos todavia, sigue abajo aplicando SOLO la
+    // correccion suave (el feedforward de velocidad da 0 porque phi ya
+    // no avanza) - entregar el control al PID de golpe con un error real
+    // todavia grande es lo que generaba el sobrepaso: el salto de
+    // "correccion suave" a "PID a toda ganancia" con varios grados de
+    // diferencia de por medio es un golpe fuerte de una.
   }
 
-  float sentido       = (restante > 0.0f) ? 1.0f : -1.0f;
-  float thetaRad       = giroThetaFijo * (PI / 180.0f);
-  float dPhiDt_rad     = sentido * giroVelocidadDegS * (PI / 180.0f); // rad/s
-  float phiActualRad   = phiActualCmd * (PI / 180.0f);
+  float sentido = (restante > 0.0f) ? 1.0f : -1.0f;
 
-  // Setpoints "de referencia" para este instante (mismo phi que lleva el
-  // software) - se usan SOLO para la correccion de abajo, no se le pasan
-  // a ningun PID mientras el giro esta activo.
-  float setpointsRef[3];
-  calcularSetpointsCinematica(giroThetaFijo, phiActualCmd, setpointsRef);
+  // Zona lenta: reduce la velocidad de barrido conforme se acerca al
+  // destino (menos inercia/coast al llegar, menos sobrepaso), mismo
+  // criterio que ya se uso para HOME.
+  float velocidadEfectiva = giroVelocidadDegS;
+  if (!phiCerca && fabs(restante) < GIRO_ZONA_LENTA_DEG) {
+    velocidadEfectiva = giroVelocidadDegS * (fabs(restante) / GIRO_ZONA_LENTA_DEG);
+    if (velocidadEfectiva < GIRO_VELOCIDAD_MINIMA_DEG_S) velocidadEfectiva = GIRO_VELOCIDAD_MINIMA_DEG_S;
+  }
+
+  float thetaRad     = giroThetaFijo * (PI / 180.0f);
+  float dPhiDt_rad   = phiCerca ? 0.0f : (sentido * velocidadEfectiva * (PI / 180.0f)); // rad/s
+  float phiActualRad = phiActualCmd * (PI / 180.0f);
 
   for (uint8_t m = 0; m < 3; m++) {
     float phi_i_rad = PHI_CABLE_DEG[m] * (PI / 180.0f);
@@ -1381,7 +1437,9 @@ void actualizarGiro() {
     escribirComandoMotor(m, duty);
   }
 
-  phiActualCmd += sentido * giroVelocidadDegS * dtSeg;
+  if (!phiCerca) {
+    phiActualCmd += sentido * velocidadEfectiva * dtSeg;
+  }
 }
 
 // Imprime el estado de los 3 encoders bajo demanda (comando STATUS), en vez

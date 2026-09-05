@@ -525,10 +525,13 @@ void girarAdelante(uint8_t m) {
     Serial.println("RECHAZADO: detén el motor (S) antes de cambiar de sentido.");
     return;
   }
-  if (limiteCableExcedido(m, 1.0f)) {
-    Serial.println("RECHAZADO: este motor ya esta en su limite de cable seguro de ese lado (recoger).");
-    return;
-  }
+  // F es manual, a proposito SIN el interlock de limiteCableExcedido():
+  // es la herramienta para corregir a mano un motor que ya quedo
+  // desincronizado (p.ej. reenrollar cable a mano tras un fallo) - el
+  // interlock ahi estorbaria justo el movimiento que se necesita para
+  // arreglar el problema. El interlock se mantiene solo en las rutinas
+  // automaticas (PID/TURN via escribirComandoMotor, HOME via
+  // homingMover), que es donde puede descontrolarse sin supervision.
   escribirPWM(PIN_LPWM[m], canalLPWM(m), 0);
   escribirPWM(PIN_RPWM[m], canalRPWM(m), velocidadMotor[m]);
   estadoMotor[m] = ADELANTE;
@@ -546,10 +549,7 @@ void girarReversa(uint8_t m) {
     Serial.println("RECHAZADO: detén el motor (S) antes de cambiar de sentido.");
     return;
   }
-  if (limiteCableExcedido(m, -1.0f)) {
-    Serial.println("RECHAZADO: este motor ya esta en su limite de cable seguro de ese lado (soltar).");
-    return;
-  }
+  // R tambien manual y sin interlock, mismo motivo que en girarAdelante().
   escribirPWM(PIN_RPWM[m], canalRPWM(m), 0);
   escribirPWM(PIN_LPWM[m], canalLPWM(m), velocidadMotor[m]);
   estadoMotor[m] = REVERSA;
@@ -1291,6 +1291,18 @@ const uint32_t GIRO_INTERVALO_MS            = 20;   // igual que el PID (50 Hz) 
 const float    GIRO_VELOCIDAD_DEG_S_DEFAULT = 15.0f; // velocidad angular por defecto, sin validar en hardware
 const float    GIRO_TOLERANCIA_DEG          = 1.0f;
 const float    GIRO_DUTY_MIN_FRICCION       = 70.0f; // piso de arranque, mismo criterio que PID_DUTY_MIN_FRICCION
+// Los 3 motores no aportan lo mismo en todo momento del barrido: la
+// formula PCC hace que el aporte de un motor pase por (casi) cero cuando
+// phi cruza cerca de su propia fase (o la opuesta). Si en ese instante se
+// le fuerza el piso GIRO_DUTY_MIN_FRICCION igual (porque el duty pedido
+// es chico pero no exactamente cero), se le da un empujon que no debia
+// recibir - eso es lo que se ve como "theta sube temporalmente durante el
+// giro y no se corrige despues, queda mas elevado": cada cruce por cero
+// de cada motor deja un pequeno exceso que no se deshace solo. Si el duty
+// pedido es menor que esto, mejor no moverlo nada (la correccion por
+// posicion real ya se encarga de cualquier drift real que aparezca) en
+// vez de forzarlo al piso de arranque.
+const float    GIRO_DUTY_ZONA_MUERTA        = 15.0f;
 
 // Frena antes de llegar (menos inercia/coast, menos sobrepaso), mismo
 // criterio que ya se uso para HOME.
@@ -1328,23 +1340,16 @@ float diferenciaAngularCorta(float desde, float hasta) {
   return diff - 180.0f;
 }
 
-// Curvatura maxima con sentido fisico: 180 deg ya dobla el tentaculo en un
-// semicirculo completo (la punta apuntando de vuelta hacia la base) - mas
-// que eso no tiene sentido mecanico y empieza a enroscarse sobre si mismo.
-// SIN VALIDAR contra el rango mecanico real todavia, es un techo de
-// sentido comun mientras tanto: con R_CABLE_MM=18.25mm, el limite de
-// cable (L_MAX_RECOGER_MM/L_MAX_SOLTAR_MM) por si solo NO alcanza a
-// frenar valores de theta absurdos (hacen falta cientos de grados de
-// theta para siquiera acercarse a esos limites) - un theta de 300 deg
-// pasaba sin que nada lo detuviera, obligando al motor a sostenerse a
-// duty maximo por varios segundos seguidos y eso es lo que disparaba el
-// problema real: a esa velocidad sostenida, el filtro de plausibilidad
-// del bus 3 (pensado para descartar lecturas corruptas) empezaba a
-// descartar tambien lecturas REALES, congelando la posicion rastreada
-// mientras el motor seguia girando de verdad - dejando ciegos tanto al
-// PID como a la pared de seguridad de cable, que comparan contra esa
-// posicion ya desincronizada de la realidad.
-const float THETA_MAX_DEG = 180.0f;
+// Curvatura maxima permitida: el tentaculo necesita poder enrollarse en
+// su totalidad, lo cual requiere theta hasta 300 deg (no solo 180). Esto
+// por si solo NO es lo que causo la fuga de cable de motor 3 - el
+// interlock real (limiteCableExcedido(), abajo) y el freno de saturacion
+// sostenida (DUTY_SATURACION_UMBRAL/TIEMPO_SATURACION_MAX_MS, en
+// escribirComandoMotor()) son los que tienen que contener el movimiento
+// fisico sin importar que tan grande sea theta - este techo solo evita
+// valores de entrada disparatados (negativos absurdos, >300, etc), no
+// reemplaza a esas dos protecciones.
+const float THETA_MAX_DEG = 300.0f;
 
 // Calcula los 3 setpoints de motor (grados) para un doblez (theta, phi)
 // dados, dejando el resultado en setpoints[3]. Aplica los limites fisicos
@@ -1547,7 +1552,8 @@ void actualizarGiro() {
     }
 
     float duty = dutyFF + dutyCorreccion;
-    if (duty > 0.0f && duty < GIRO_DUTY_MIN_FRICCION) duty = GIRO_DUTY_MIN_FRICCION;
+    if (fabs(duty) < GIRO_DUTY_ZONA_MUERTA) duty = 0.0f;
+    else if (duty > 0.0f && duty < GIRO_DUTY_MIN_FRICCION) duty = GIRO_DUTY_MIN_FRICCION;
     else if (duty < 0.0f && duty > -GIRO_DUTY_MIN_FRICCION) duty = -GIRO_DUTY_MIN_FRICCION;
     duty = constrain(duty, -255.0f, 255.0f);
 
